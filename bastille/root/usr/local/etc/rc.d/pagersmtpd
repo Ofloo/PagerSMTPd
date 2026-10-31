@@ -40,6 +40,11 @@ stop_cmd="pagersmtpd_stop"
 
 pagersmtpd_start() {
     pagersmtpd_precmd || return 1
+    # Drop a stale pidfile left by a crashed/killed instance.
+    pidfile="/var/run/${name}.pid"
+    if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        rm -f "$pidfile"
+    fi
     echo "Starting ${name} as ${pagersmtpd_user}."
     /usr/sbin/daemon -u "${pagersmtpd_user}" -p "/var/run/${name}.pid" \
         /usr/local/bin/python3 /usr/local/lib/pagersmtpd/smtp_server.py
