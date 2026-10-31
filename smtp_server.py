@@ -32,14 +32,11 @@ from aiosmtpd.smtp import SMTP as SMTPServer
 
 
 def _safe_get_localhost() -> str:
-    """aiosmtpd probes AF_INET6 unconditionally and crashes where IPv6 is
-    unavailable (FreeBSD jails, minimal containers). Fall back to IPv4."""
-    try:
-        with _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM) as sock:
-            sock.bind(("::1", 0))
-            return sock.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
+    """aiosmtpd's readiness check uses get_localhost(); its IPv6 probe crashes
+    or is unreachable where IPv6 is disabled (FreeBSD jails, minimal
+    containers). We always listen on IPv4 (SMTP_HOST defaults to 0.0.0.0), so
+    the internal check must use IPv4 too."""
+    return "127.0.0.1"
 
 
 _controller_mod.get_localhost = _safe_get_localhost
