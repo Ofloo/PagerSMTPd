@@ -118,7 +118,7 @@ if notes:
           all(k in p for k in ("PROJECT", "JOB_ID", "status", "message", "logs")), json.dumps(p)[:200])
     check("message contains sender and subject", "sender@example.org" in p["message"] and "hello" in p["message"])
     check("logs contain body", "test body" in p["logs"])
-    check("logs start with a header block", p["logs"].startswith("From: sender@example.org"), p["logs"][:80])
+    check("logs have no header block", not p["logs"].startswith("From:"), p["logs"][:80])
 
 # 1b. uuid sender -> title is just the subject (no uuid noise in the page)
 m = EmailMessage()
@@ -198,6 +198,31 @@ notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "html-only" i
 check("html-only text extracted without tags",
       bool(notes) and "Hallo wereld" in notes[0]["payload"]["logs"] and "<p>" not in notes[0]["payload"]["logs"],
       notes[0]["payload"]["logs"][:150] if notes else "missing")
+
+# 1g. forwarded mail (message/rfc822) body is used; the .eml is not uploaded
+inner = EmailMessage()
+inner["From"] = "forwarded@example.org"
+inner["To"] = f"{VALID_UUID}@{DOMAIN}"
+inner["Subject"] = "inner-subject"
+inner["X-Spam-Status"] = "Yes"
+inner.set_content("Dit is de doorgestuurde tekst.")
+outer = EmailMessage()
+outer["From"] = "forwarder@example.org"
+outer["To"] = f"{VALID_UUID}@{DOMAIN}"
+outer["Subject"] = "fwd-mail"
+outer["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+outer.set_content("Zie hieronder.")
+outer.add_attachment(inner, filename="ForwardedMessage.eml")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", outer.as_bytes(policy=email.policy.SMTP))
+check("forwarded mail accepted", code == 250, f"{code} {msg}")
+time.sleep(0.5)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "fwd-mail" in n["payload"]["message"]]
+check("forwarded body text present", bool(notes) and "Dit is de doorgestuurde tekst." in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:150] if notes else "missing")
+check("forwarded .eml not uploaded as attachment", bool(notes) and notes[0]["payload"]["attachments"] == [],
+      str(notes[0]["payload"]["attachments"]) if notes else "missing")
+check("forwarded headers not in logs", bool(notes) and "X-Spam-Status" not in notes[0]["payload"]["logs"])
 
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())

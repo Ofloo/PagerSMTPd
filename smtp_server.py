@@ -214,6 +214,24 @@ def upload_attachment(filename: str, payload: bytes) -> str:
     raise RuntimeError(f"share upload failed for {filename!r}: HTTP {status}")
 
 
+def iter_leaf_parts(part: Message):
+    """Yield real content leaves, descending into message/rfc822 (forwards)."""
+    ctype = part.get_content_type()
+    if ctype == "message/rfc822":
+        payload = part.get_payload()
+        if isinstance(payload, list):
+            for sub in payload:
+                yield from iter_leaf_parts(sub)
+        elif isinstance(payload, Message):
+            yield from iter_leaf_parts(payload)
+        return
+    if part.is_multipart():
+        for sub in part.get_payload():
+            yield from iter_leaf_parts(sub)
+        return
+    yield part
+
+
 def extract_text(msg: Message) -> str:
     plain: list[str] = []
     html_parts: list[str] = []
@@ -233,7 +251,7 @@ def extract_text(msg: Message) -> str:
             html_parts.append(content)
 
     if msg.is_multipart():
-        for part in msg.walk():
+        for part in iter_leaf_parts(msg):
             collect(part)
     else:
         collect(msg)
@@ -302,16 +320,6 @@ def html_to_text(html: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", html)
 
 
-def header_block(msg: Message) -> str:
-    """Minimal, human-useful header block for the pager `logs` field."""
-    lines = []
-    for field in ("From", "To", "Cc", "Subject", "Date"):
-        value = str(msg.get(field, "") or "").replace("\n", " ").strip()
-        if value:
-            lines.append(f"{field}: {value}")
-    return "\n".join(lines)
-
-
 def sender_address(sender_header: str) -> str:
     from email.utils import parseaddr
 
@@ -335,9 +343,12 @@ def notification_title(sender: str, subject: str) -> str:
 
 
 def extract_attachments(msg: Message) -> list[tuple[str, bytes]]:
+    """Real file attachments only: forwarded mails (message/rfc822) are body."""
     out: list[tuple[str, bytes]] = []
-    for part in msg.walk():
+    for part in iter_leaf_parts(msg):
         filename = part.get_filename()
+        if part.get_content_type() in ("text/plain", "text/html"):
+            continue
         if part.get_content_disposition() == "attachment" or filename:
             payload = part.get_payload(decode=True)
             if payload is None:
@@ -440,11 +451,9 @@ class PagerHandler:
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
         body_text = clean_text(extract_text(msg))
-        # Header block first, then the body: the pager UI only shows `logs`,
-        # so From/To/Date/Message-ID must be visible there.
-        headers = header_block(msg)
-        logs = (headers + "\n\n" + body_text).strip() if headers else body_text
-        logs = logs[:4000]
+        # No header block: the page shows the text body only. Transport and
+        # spam headers are dropped by clean_text() as well.
+        logs = body_text[:6000]
         if log_notes:
             logs = (logs + "\n" + "\n".join(log_notes)).strip()
         title = notification_title(sender, subject)
