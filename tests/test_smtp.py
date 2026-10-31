@@ -116,6 +116,7 @@ if notes:
     p = notes[0]["payload"]
     check("payload has PROJECT/JOB_ID/status/message/logs",
           all(k in p for k in ("PROJECT", "JOB_ID", "status", "message", "logs")), json.dumps(p)[:200])
+    check("status is numeric for PagerAPP", isinstance(p.get("status"), int), repr(p.get("status")))
     check("message contains sender and subject", "sender@example.org" in p["message"] and "hello" in p["message"])
     check("logs contain body", "test body" in p["logs"])
     check("logs have no header block", not p["logs"].startswith("From:"), p["logs"][:80])

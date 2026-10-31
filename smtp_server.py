@@ -496,7 +496,12 @@ class PagerHandler:
             payload = {
                 "PROJECT": PROJECT,
                 "JOB_ID": message_id,
-                "status": "received",
+                # Numeric status matches the PagerAPP page contract (1 = warning,
+                # i.e. a new mail that needs attention). The human word is kept
+                # in status_text.
+                "status": 1,
+                "status_text": "received",
+                "exit_code": 0,
                 "message": title,
                 "logs": logs,
                 "attachments": attachment_urls,
