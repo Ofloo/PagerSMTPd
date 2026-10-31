@@ -351,28 +351,6 @@ def html_to_text(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def sender_address(sender_header: str) -> str:
-    from email.utils import parseaddr
-
-    return parseaddr(sender_header)[1] or sender_header.strip()
-
-
-def notification_title(sender: str, subject: str) -> str:
-    """Title for the page: sender + subject, unless the sender is a mailbox uuid.
-
-    A uuid sender carries no information for the reader, so in that case only
-    the subject is used.
-    """
-    address = sender_address(sender)
-    local = address.rpartition("@")[0]
-    subject = (subject or "").strip()
-    if UUID_RE.match(local or ""):
-        return subject or f"Mail from {address}"
-    if subject:
-        return f"{address or sender} — {subject}"
-    return f"Mail from {address or sender}"
-
-
 def extract_attachments(msg: Message) -> list[tuple[str, bytes]]:
     """Real file attachments only: forwarded mails (message/rfc822) are body."""
     out: list[tuple[str, bytes]] = []
@@ -482,32 +460,24 @@ class PagerHandler:
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
         body_text = clean_text(extract_text(msg))
-        # The PagerAPP page views render `message` (logs is only shown by some
-        # clients / the notification), so the whole mail text goes into
-        # `message`: title line, blank line, cleaned body. `logs` stays empty to
-        # avoid showing the body twice in notifications.
-        body_text = body_text[:6000]
+        # RFC-PagerAPP-0003 (docs/rfc-gateway.md): message is the readable
+        # title (normally the subject), logs is the plain-text body.
+        body_text = body_text[:8000]
         if log_notes:
             body_text = (body_text + "\n" + "\n".join(log_notes)).strip()
-        title = notification_title(sender, subject)
-        message = f"{title}\n\n{body_text}" if body_text else title
-        message = message[:8000]
+        subject_text = (subject or "").strip()
+        message = subject_text or body_text.strip()[:120] or "(no subject)"
 
         recipients = sorted({addr.rpartition("@")[0].lower() for addr in envelope.rcpt_tos})
         permanent = False
         temporary = False
         for local in recipients:
             payload = {
+                "status": 1,  # warning: a new mail that needs attention
                 "PROJECT": PROJECT,
                 "JOB_ID": message_id,
-                # Numeric status matches the PagerAPP page contract (1 = warning,
-                # i.e. a new mail that needs attention). The human word is kept
-                # in status_text.
-                "status": 1,
-                "status_text": "received",
-                "exit_code": 0,
                 "message": message,
-                "logs": "",
+                "logs": body_text,
                 "attachments": attachment_urls,
                 "source": "smtp",
                 "smtpd_version": VERSION_STRING,

@@ -117,25 +117,9 @@ if notes:
     check("payload has PROJECT/JOB_ID/status/message/logs",
           all(k in p for k in ("PROJECT", "JOB_ID", "status", "message", "logs")), json.dumps(p)[:200])
     check("status is numeric for PagerAPP", isinstance(p.get("status"), int), repr(p.get("status")))
-    check("message contains sender and subject", "sender@example.org" in p["message"] and "hello" in p["message"])
-    check("message contains the body", "test body" in p["message"])
-    check("logs is empty (body lives in message)", p["logs"] == "", repr(p["logs"]))
-    check("message has no header block", not p["message"].startswith("From:"), p["message"][:80])
-
-# 1b. uuid sender -> title is just the subject (no uuid noise in the page)
-m = EmailMessage()
-m["From"] = f"{uuid.uuid4()}@pager.ofloo.io"
-m["To"] = f"{VALID_UUID}@{DOMAIN}"
-m["Subject"] = "uuid-sender-subject"
-m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
-m.set_content("uuid sender body")
-code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
-check("uuid sender accepted", code == 250, f"{code} {msg}")
-time.sleep(0.4)
-st = state()
-notes = [n for n in st["notify"] if n["payload"]["message"].startswith("uuid-sender-subject")]
-check("uuid sender: title is only the subject", len(notes) == 1,
-      str([n["payload"]["message"] for n in st["notify"]])[-150:])
+    check("message is the subject (RFC gateway mapping)", p["message"] == "hello", repr(p["message"]))
+    check("logs is the plain-text body", "test body" in p["logs"], repr(p["logs"])[:80])
+    check("logs has no header block", not p["logs"].startswith("From:"), p["logs"][:80])
 
 # 1c. catch-all: several different uuids all accepted (no session lock)
 other = str(uuid.uuid4())
@@ -179,7 +163,7 @@ st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "noisy" in n["payload"]["message"]]
 check("noisy page received", len(notes) == 1)
 if notes:
-    text = notes[0]["payload"]["message"]
+    text = notes[0]["payload"]["logs"]
     check("DKIM/X-Spam/Autocrypt noise stripped",
           not any(k in text for k in ("DKIM-Signature", "X-Spam", "Autocrypt", "Spam detection", "BAYES_99")), text[:200])
     check("body survives cleaning", "Echte berichttekst hier." in text)
@@ -198,8 +182,8 @@ time.sleep(0.4)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "html-only" in n["payload"]["message"]]
 check("html-only text extracted without tags",
-      bool(notes) and "Hallo wereld" in notes[0]["payload"]["message"] and "<p>" not in notes[0]["payload"]["message"],
-      notes[0]["payload"]["message"][:150] if notes else "missing")
+      bool(notes) and "Hallo wereld" in notes[0]["payload"]["logs"] and "<p>" not in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:150] if notes else "missing")
 
 # 1g. forwarded mail (message/rfc822) body is used; the .eml is not uploaded
 inner = EmailMessage()
@@ -220,11 +204,11 @@ check("forwarded mail accepted", code == 250, f"{code} {msg}")
 time.sleep(0.5)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "fwd-mail" in n["payload"]["message"]]
-check("forwarded body text present", bool(notes) and "Dit is de doorgestuurde tekst." in notes[0]["payload"]["message"],
-      notes[0]["payload"]["message"][:150] if notes else "missing")
+check("forwarded body text present", bool(notes) and "Dit is de doorgestuurde tekst." in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:150] if notes else "missing")
 check("forwarded .eml not uploaded as attachment", bool(notes) and notes[0]["payload"]["attachments"] == [],
       str(notes[0]["payload"]["attachments"]) if notes else "missing")
-check("forwarded headers not in message", bool(notes) and "X-Spam-Status" not in notes[0]["payload"]["message"])
+check("forwarded headers not in logs", bool(notes) and "X-Spam-Status" not in notes[0]["payload"]["logs"])
 
 # 1h. empty text/plain + filled text/html -> HTML body must be used
 m = EmailMessage()
@@ -240,8 +224,8 @@ time.sleep(0.4)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "empty-plain" in n["payload"]["message"]]
 check("empty text/plain falls back to HTML body",
-      bool(notes) and "HTML fallback tekst" in notes[0]["payload"]["message"],
-      notes[0]["payload"]["message"][:120] if notes else "missing")
+      bool(notes) and "HTML fallback tekst" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "missing")
 
 # 1i. quoted-printable body (Thunderbird default) decodes correctly
 qp = EmailMessage()
@@ -255,8 +239,8 @@ code, msg = send(f"{VALID_UUID}@{DOMAIN}", qp.as_bytes(policy=email.policy.SMTP)
 time.sleep(0.4)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "qp-body" in n["payload"]["message"]]
-check("quoted-printable body decoded", bool(notes) and "Regel met aanhalingstekens" in notes[0]["payload"]["message"],
-      notes[0]["payload"]["message"][:120] if notes else "missing")
+check("quoted-printable body decoded", bool(notes) and "Regel met aanhalingstekens" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "missing")
 
 # 1j. spam wrapper: report text ignored, original attached mail used
 orig = EmailMessage()
@@ -292,9 +276,23 @@ st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "SPAM" in n["payload"]["message"]]
 check("spam wrapper page received", len(notes) == 1)
 if notes:
-    text = notes[0]["payload"]["message"]
+    text = notes[0]["payload"]["logs"]
     check("spam report text ignored", "Spam detection software" not in text and "ALL_TRUSTED" not in text, text[:150])
     check("original body used from attached mail", "echte berichttekst" in text, text[:150])
+
+# 1h2. empty subject -> message falls back to a body excerpt (RFC §3)
+m = EmailMessage()
+m["From"] = "nosubject@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = ""
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m.set_content("Body zonder onderwerp")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "Body zonder onderwerp" in n["payload"].get("message", "")]
+check("empty subject falls back to body excerpt", len(notes) == 1,
+      str([n["payload"]["message"] for n in st["notify"]])[-150:])
 
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
@@ -381,8 +379,8 @@ check("share failure does not reject the mail", code == 250, f"{code} {msg}")
 time.sleep(0.5)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "share-fail" in n["payload"]["message"]]
-check("share failure recorded in message", bool(notes) and "attachment upload failed" in notes[0]["payload"]["message"],
-      notes[0]["payload"]["message"][:120] if notes else "no note")
+check("share failure recorded in logs", bool(notes) and "attachment upload failed" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "no note")
 if notes:
     check("no attachments[] on failed upload", notes[0]["payload"]["attachments"] == [])
 set_control()
