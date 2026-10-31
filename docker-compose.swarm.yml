@@ -15,7 +15,6 @@ services:
       PAGER_DOMAIN: ${PAGER_DOMAIN:?PAGER_DOMAIN is required}
       PAGER_URL: ${PAGER_URL:-https://pager.ofloo.io}
       SHARE_URL: ${SHARE_URL:-https://share.h4ck.io}
-      PAGER_SESSION_ID: ${PAGER_SESSION_ID:-}
       PAGER_PROJECT: ${PAGER_PROJECT:-smtp}
       MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-60000}
       MAX_ATTACHMENT_BYTES: ${MAX_ATTACHMENT_BYTES:-104857600}

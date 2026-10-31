@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Receive-only SMTP catch-all that forwards mail to PagerMCP.
 
-Accepts mail only for <uuid>@PAGER_DOMAIN (optionally restricted to a single
-PAGER_SESSION_ID), uploads attachments to SHARE_URL (HTTPS PUT) and posts the
-message to PAGER_URL/notify with the uuid as Bearer token.
+Accepts mail for any <uuid>@PAGER_DOMAIN, uploads attachments to SHARE_URL
+(HTTPS PUT) and posts the message to PAGER_URL/notify with that uuid as Bearer
+token. Any well-formed uuid is accepted; PagerMCP decides whether the mailbox
+exists (unknown/full mailboxes are reported back to the SMTP client).
 
 There is deliberately NO outbound SMTP: this can never become an open relay.
 The only outbound connections are HTTPS to PAGER_URL and SHARE_URL.
@@ -47,7 +48,6 @@ def env_int(name: str, default: int) -> int:
 PAGER_DOMAIN = os.environ.get("PAGER_DOMAIN", "").strip().lower()
 PAGER_URL = os.environ.get("PAGER_URL", "https://pager.ofloo.io").strip().rstrip("/")
 SHARE_URL = os.environ.get("SHARE_URL", "https://share.h4ck.io").strip().rstrip("/")
-PAGER_SESSION_ID = os.environ.get("PAGER_SESSION_ID", "").strip().lower()
 SMTP_HOST = os.environ.get("SMTP_HOST", "0.0.0.0")
 SMTP_PORT = env_int("SMTP_PORT", 8025)
 MAX_MESSAGE_BYTES = env_int("MAX_MESSAGE_BYTES", 60000)
@@ -270,9 +270,6 @@ class PagerHandler:
         if domain != PAGER_DOMAIN or not UUID_RE.match(local or ""):
             LOG.info("rejected RCPT from %s: %s (domain=%s)", peer, address, domain)
             return f"550 5.1.1 mailbox <{address}> not accepted here"
-        if PAGER_SESSION_ID and local.lower() != PAGER_SESSION_ID:
-            LOG.info("rejected RCPT from %s: %s not the configured session mailbox", peer, address)
-            return "550 5.1.1 mailbox not accepted here"
         envelope.rcpt_tos.append(address)
         LOG.info("accepted RCPT from %s: %s", peer, address)
         return "250 OK"
@@ -392,11 +389,10 @@ class PagerController(Controller):
 def main() -> None:
     LOG.info(
         "starting receive-only SMTP on %s:%d domain=%s pager=%s share=%s "
-        "max_total=%d max_msg=%d max_att=%d max_attachments=%d rate=%d/%ds session_lock=%s",
+        "max_total=%d max_msg=%d max_att=%d max_attachments=%d rate=%d/%ds",
         SMTP_HOST, SMTP_PORT, PAGER_DOMAIN, PAGER_URL, SHARE_URL,
         MAX_TOTAL_BYTES, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS,
         RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW_SECONDS,
-        PAGER_SESSION_ID or "any-uuid",
     )
     controller = PagerController(
         PagerHandler(), hostname=SMTP_HOST, port=SMTP_PORT

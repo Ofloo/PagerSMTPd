@@ -18,7 +18,6 @@ STATE_FILE = sys.argv[1]
 CONTROL_FILE = sys.argv[2] if len(sys.argv) > 2 else None
 DOMAIN = "test.local"
 VALID_UUID = str(uuid.uuid4())
-SESSION_UUID = str(uuid.uuid4())
 
 failures = []
 procs = []
@@ -135,6 +134,14 @@ st = state()
 notes = [n for n in st["notify"] if n["payload"]["message"] == "uuid-sender-subject"]
 check("uuid sender: title is only the subject", len(notes) == 1,
       str([n["payload"]["message"] for n in st["notify"]])[-150:])
+
+# 1c. catch-all: several different uuids all accepted (no session lock)
+other = str(uuid.uuid4())
+code, msg = send(f"{other}@{DOMAIN}", build_mail(subject="catch-all-other-uuid"))
+check("any valid uuid accepted (catch-all, no lock)", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+check("other uuid got its own page", any(n["mailbox"] == other for n in st["notify"]))
 
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
@@ -261,17 +268,6 @@ for _ in range(3):
     codes.append(s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")[0])
     s.docmd("RSET")
 check("rate limit: first two accepted, third 451", codes == [250, 250, 451], str(codes))
-s.quit()
-
-# 15. PAGER_SESSION_ID lock
-start_server(18026, PAGER_SESSION_ID=SESSION_UUID)
-s = smtplib.SMTP(HOST, 18026, timeout=15)
-s.ehlo("t")
-s.docmd("MAIL", "FROM:<a@b.c>")
-code, msg = s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
-check("locked: other uuid rejected (550)", code == 550, f"{code} {msg}")
-code, msg = s.docmd("RCPT", f"TO:<{SESSION_UUID}@{DOMAIN}>")
-check("locked: session uuid accepted (250)", code == 250, f"{code} {msg}")
 s.quit()
 
 for proc in procs:
