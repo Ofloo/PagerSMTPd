@@ -229,6 +229,16 @@ def iter_leaf_parts(part: Message):
     yield part
 
 
+def find_rfc822(part: Message):
+    """Yield message/rfc822 parts (a forwarded/attached original mail)."""
+    if part.get_content_type() == "message/rfc822":
+        yield part
+        return
+    if part.is_multipart():
+        for sub in part.get_payload():
+            yield from find_rfc822(sub)
+
+
 def extract_text(msg: Message) -> str:
     plain: list[str] = []
     html_parts: list[str] = []
@@ -247,11 +257,15 @@ def extract_text(msg: Message) -> str:
         elif ctype == "text/html":
             html_parts.append(content)
 
-    if msg.is_multipart():
-        for part in iter_leaf_parts(msg):
+    # A spam/virus scanner wraps the original mail as message/rfc822 and adds
+    # its own report text. The report is noise: prefer the real message.
+    forwarded = list(find_rfc822(msg))
+    source = forwarded[0] if forwarded else msg
+    if source.is_multipart() or source.get_content_type() == "message/rfc822":
+        for part in iter_leaf_parts(source):
             collect(part)
     else:
-        collect(msg)
+        collect(source)
 
     plain_text = "\n".join(plain).strip()
     if plain_text:
@@ -291,15 +305,26 @@ SPAM_BLOCK_MARKERS = (
 def clean_text(text: str) -> str:
     """Strip header noise, spam reports and giant base64 blobs from a body."""
     lines = []
+    skip_report = False
     for line in text.splitlines():
         stripped = line.strip()
         low = stripped.lower()
-        if NOISE_HEADER_RE.match(stripped):
+        if skip_report:
+            # The SpamAssassin block ends at the first blank line.
+            if not stripped:
+                skip_report = False
             continue
         if any(low.startswith(marker) for marker in SPAM_BLOCK_MARKERS):
+            skip_report = True
             continue
-        # SpamAssassin score table rows: "-1.0 ALL_TRUSTED  Passed through ..."
+        if NOISE_HEADER_RE.match(stripped):
+            continue
+        # SpamAssassin score table rows and their indented continuations.
         if re.match(r"^-?\d+\.\d+\s+[A-Z0-9_]{3,}\s{2,}", stripped):
+            continue
+        if re.match(r"^(pts rule name|-{2,}\s)", stripped, re.IGNORECASE):
+            continue
+        if re.match(r"^\[[A-Z][^\]]*\]$", stripped) or re.match(r"^\[score:", stripped):
             continue
         if len(line) > 300:
             line = line[:300] + "…"

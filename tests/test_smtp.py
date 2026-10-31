@@ -256,6 +256,44 @@ notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "qp-body" in 
 check("quoted-printable body decoded", bool(notes) and "Regel met aanhalingstekens" in notes[0]["payload"]["logs"],
       notes[0]["payload"]["logs"][:120] if notes else "missing")
 
+# 1j. spam wrapper: report text ignored, original attached mail used
+orig = EmailMessage()
+orig["From"] = "sender@example.org"
+orig["To"] = f"{VALID_UUID}@{DOMAIN}"
+orig["Subject"] = "orig-subject"
+orig.set_content("Dit is de echte berichttekst van de afzender.")
+wrap = EmailMessage()
+wrap["From"] = "MAILER-DAEMON@loki.ofloo.net"
+wrap["To"] = f"{VALID_UUID}@{DOMAIN}"
+wrap["Subject"] = "*****SPAM***** orig-subject"
+wrap["Message-ID"] = f"<{uuid.uuid4().hex}@loki>"
+wrap.set_content(
+    "Spam detection software, running on the system \"loki.ofloo.net\",\n"
+    "has identified this incoming email as possible spam.  The original\n"
+    "message has been attached to this so you can view it.\n"
+    "\n"
+    "Content preview:  test\n"
+    "\n"
+    "Content analysis details:   (5.4 points, 5.0 required)\n"
+    "\n"
+    " pts rule name              description\n"
+    "---- ---------------------- --------------------------------------------------\n"
+    "-1.0 ALL_TRUSTED            Passed through trusted hosts only\n"
+    " 0.0 SPF_FAIL               SPF: sender does not match\n"
+    "                            [SPF failed: Rejected by SPF record.]\n"
+)
+wrap.add_attachment(orig, filename="orig-subject.eml")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", wrap.as_bytes(policy=email.policy.SMTP))
+check("spam wrapper accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "SPAM" in n["payload"]["message"]]
+check("spam wrapper page received", len(notes) == 1)
+if notes:
+    logs = notes[0]["payload"]["logs"]
+    check("spam report text ignored", "Spam detection software" not in logs and "ALL_TRUSTED" not in logs, logs[:150])
+    check("original body used from attached mail", "echte berichttekst" in logs, logs[:150])
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")
