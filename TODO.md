@@ -4,6 +4,8 @@
 - [x] Podman-variant (`podman/` Quadlet) — image is OCI, ongewijzigd bruikbaar.
 - [x] FreeBSD port-skeleton (`ports/mail/pagersmtpd/`).
 - [ ] Podman-variant testen op een host met Podman (hier niet geïnstalleerd).
+- [ ] `X-Pager-*`-headers implementeren (RFC-PagerSMPTd-0001 §6) inclusief allowlist voor urgentie.
+- [ ] Quoted history/handtekeningen strippen (heuristiek, voorzichtig).
 - [ ] FreeBSD port testen via `poudriere testport` (template wel al getest in een jail).
 - [x] Bastille-template getest op FreeBSD 15.1 (Bastille 1.4.4), jail `pagersmtp` op 10.13.40.202.
 - [ ] STARTTLS op SMTP (cert via env of reverse proxy op 465/587).
