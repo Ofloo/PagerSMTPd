@@ -151,6 +151,54 @@ time.sleep(0.3)
 st = state()
 check("payload carries smtpd_version", any(n["payload"].get("smtpd_version") for n in st["notify"]))
 
+# 1e. cleaning: header noise / spam report / huge blobs are stripped
+noisy = build_mail(subject="noisy", body="")
+
+# build a body that mimics a forwarded spam report (Thunderbird NL headers)
+noise_body = "\r\n".join([
+    "Van: Wouter Snels <ofloo@h4ck.io>",
+    "Onderwerp: test",
+    "Bericht-ID: <abc@h4ck.io>",
+    "DKIM-Signature: v=1; a=rsa-sha256; b=" + "X" * 400,
+    "X-Spam-Flag: YES",
+    "X-Spam-Status: Yes, score=5.4 required=5.0",
+    "Autocrypt: addr=ofloo@h4ck.io; keydata=" + "Y" * 400,
+    "Spam detection software, running on the system \"loki\"",
+    "Content analysis details:   (5.4 points, 5.0 required)",
+    " 3.5 BAYES_99               BODY: Bayes spam probability is 99 to 100%",
+    "",
+    "Echte berichttekst hier.",
+])
+noisy = build_mail(subject="noisy", body=noise_body)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", noisy)
+check("noisy mail accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "noisy" in n["payload"]["message"]]
+check("noisy page received", len(notes) == 1)
+if notes:
+    logs = notes[0]["payload"]["logs"]
+    check("DKIM/X-Spam/Autocrypt noise stripped",
+          not any(k in logs for k in ("DKIM-Signature", "X-Spam", "Autocrypt", "Spam detection", "BAYES_99")), logs[:200])
+    check("body survives cleaning", "Echte berichttekst hier." in logs)
+    check("no overlong lines", all(len(l) <= 320 for l in logs.splitlines()))
+
+# 1f. html-only mail -> text extracted without tags
+html_mail = EmailMessage()
+html_mail["From"] = "html@example.org"
+html_mail["To"] = f"{VALID_UUID}@{DOMAIN}"
+html_mail["Subject"] = "html-only"
+html_mail["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+html_mail.set_content("<html><body><p>Hallo <b>wereld</b></p><script>x()</script></body></html>", subtype="html")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", html_mail.as_bytes(policy=email.policy.SMTP))
+check("html-only mail accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "html-only" in n["payload"]["message"]]
+check("html-only text extracted without tags",
+      bool(notes) and "Hallo wereld" in notes[0]["payload"]["logs"] and "<p>" not in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:150] if notes else "missing")
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")

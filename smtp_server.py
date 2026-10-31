@@ -198,28 +198,97 @@ def upload_attachment(filename: str, payload: bytes) -> str:
 
 
 def extract_text(msg: Message) -> str:
-    chunks: list[str] = []
+    plain: list[str] = []
+    html_parts: list[str] = []
+
+    def collect(part: Message) -> None:
+        if part.get_content_disposition() == "attachment":
+            return
+        ctype = part.get_content_type()
+        try:
+            content = part.get_content()
+        except Exception:
+            payload = part.get_payload(decode=True) or b""
+            content = payload.decode(part.get_content_charset() or "utf-8", "replace")
+        if ctype == "text/plain":
+            plain.append(content)
+        elif ctype == "text/html":
+            html_parts.append(content)
+
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain" and part.get_content_disposition() != "attachment":
-                try:
-                    chunks.append(part.get_content())
-                except Exception:
-                    payload = part.get_payload(decode=True) or b""
-                    chunks.append(payload.decode(part.get_content_charset() or "utf-8", "replace"))
+            collect(part)
     else:
-        try:
-            chunks.append(msg.get_content())
-        except Exception:
-            payload = msg.get_payload(decode=True) or b""
-            chunks.append(payload.decode(msg.get_content_charset() or "utf-8", "replace"))
-    return "\n".join(chunks).strip()
+        collect(msg)
+
+    if plain:
+        return "\n".join(plain).strip()
+    if html_parts:
+        return html_to_text("\n".join(html_parts)).strip()
+    return ""
+
+
+# Headers that carry no value for the human reading a page (spam scoring,
+# transport traces, signatures, MIME plumbing). Matched case-insensitively in
+# English and the common localized forms Thunderbird/Outlook emit.
+NOISE_HEADER_RE = re.compile(
+    r"^(received|return-path|delivered-to|dkim-signature|domainkey-signature|"
+    r"arc-[a-z-]+|authentication-results|received-spf|arc-seal|arc-message-signature|"
+    r"x-spam[a-z-]*|x-virus[a-z-]*|x-mailer|user-agent|useragent|x-mailer|"
+    r"autocrypt|content-language|x-envelope-(from|to)|x-original-to|x-uidl|"
+    r"mime-version|mime-versie|mime-version|content-type|inhoud-type|"
+    r"content-transfer-encoding|inhoudsoverbrengcodering|"
+    r"message-id|bericht-id|in-reply-to|references|reply-to|antwoord-naar|"
+    r"list-[a-z-]+|precedence|x-priority|importance|prioriteit|"
+    r"x-spam-level|x-spam-status|x-spam-flag|x-spam-checker-version|"
+    r"van|aan|onderwerp|datum|von|betreff|nachricht-id|"
+    r"de|objet|identifiant-du-message)\s*:",
+    re.IGNORECASE,
+)
+
+SPAM_BLOCK_MARKERS = (
+    "spam detection software",
+    "content analysis details:",
+    "content preview:",
+    "spamassassin",
+)
+
+
+def clean_text(text: str) -> str:
+    """Strip header noise, spam reports and giant base64 blobs from a body."""
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        low = stripped.lower()
+        if NOISE_HEADER_RE.match(stripped):
+            continue
+        if any(low.startswith(marker) for marker in SPAM_BLOCK_MARKERS):
+            continue
+        # SpamAssassin score table rows: "-1.0 ALL_TRUSTED  Passed through ..."
+        if re.match(r"^-?\d+\.\d+\s+[A-Z0-9_]{3,}\s{2,}", stripped):
+            continue
+        if len(line) > 300:
+            line = line[:300] + "…"
+        lines.append(line.rstrip())
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def html_to_text(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", html)
+    html = re.sub(r"<[^>]+>", " ", html)
+    import html as htmlmod
+    html = htmlmod.unescape(html)
+    return re.sub(r"[ \t]{2,}", " ", html)
 
 
 def header_block(msg: Message) -> str:
-    """RFC822-like header block shown at the top of the pager `logs` field."""
+    """Minimal, human-useful header block for the pager `logs` field."""
     lines = []
-    for field in ("From", "To", "Cc", "Subject", "Date", "Message-ID"):
+    for field in ("From", "To", "Cc", "Subject", "Date"):
         value = str(msg.get(field, "") or "").replace("\n", " ").strip()
         if value:
             lines.append(f"{field}: {value}")
@@ -353,7 +422,7 @@ class PagerHandler:
         subject = str(msg.get("Subject", ""))
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
-        body_text = extract_text(msg)
+        body_text = clean_text(extract_text(msg))
         # Header block first, then the body: the pager UI only shows `logs`,
         # so From/To/Date/Message-ID must be visible there.
         headers = header_block(msg)
