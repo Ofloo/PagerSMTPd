@@ -27,6 +27,7 @@ CP ../VERSION /usr/local/lib/pagersmtpd/VERSION
 
 # rc script + default env
 CP root/ /
+CMD chmod +x /usr/local/etc/rc.d/pagersmtpd
 
 SYSRC pagersmtpd_enable=YES
 
