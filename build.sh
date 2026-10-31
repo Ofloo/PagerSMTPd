@@ -67,12 +67,22 @@ notify_pager running "build started: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER} 
 trap 'notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 30 .build_last.log 2>/dev/null || true)"' ERR
 trap 'notify_pager failed "build interrupted: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" ""' INT TERM
 
-# Build and push; capture output for logs
+# Build and push; capture output for logs.
+# Every build pushes BOTH the requested tag AND the version tag v<VERSION>,
+# so a release always has a pinned image (e.g. ofloo/pagersmtpd:v0.1.0).
+V="v$(tr -d ' \n' < VERSION 2>/dev/null || true)"
+[[ "$V" == "v" ]] && V="v${TAG}"
+TAGS=("-t" "${IMAGE_NAME}:${TAG}")
+if [[ "$V" != "v${TAG}" ]]; then
+    TAGS+=("-t" "${IMAGE_NAME}:${V}")
+fi
+echo "🏷️  Image tags: ${IMAGE_NAME}:${TAG} ${IMAGE_NAME}:${V}"
+
 BUILD_LOG=".build_last.log"
 echo "🚀 Starting build..."
 if docker buildx build \
     --platform "$PLATFORMS" \
-    -t "${IMAGE_NAME}:${TAG}" \
+    "${TAGS[@]}" \
     $BUILD_ARGS \
     --push \
     . 2>&1 | tee "$BUILD_LOG"; then
@@ -89,12 +99,10 @@ if [[ "$BUILD_OK" != "1" ]]; then
 fi
 trap - ERR INT TERM
 
-echo "✅ Successfully built and pushed ${IMAGE_NAME}:${TAG} for ${PLATFORMS}"
+echo "✅ Successfully built and pushed ${IMAGE_NAME}:${TAG} + ${IMAGE_NAME}:${V} for ${PLATFORMS}"
 
 # --- release commit + tag: ONLY after a successful build --------------------
 if git rev-parse --git-dir >/dev/null 2>&1; then
-    V="v$(tr -d ' \n' < VERSION 2>/dev/null || true)"
-    if [[ "$V" == "v" ]]; then V="v${TAG}"; fi
     if git rev-parse -q --verify "refs/tags/${V}" >/dev/null; then
         echo "🏷️  Tag ${V} already exists"
     else
@@ -107,4 +115,4 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-notify_pager succeeded "build OK: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER} commit=${SHA} platforms=${PLATFORMS}" "image pushed: ${IMAGE_NAME}:${TAG}"
+notify_pager succeeded "build OK: ${IMAGE_NAME}:${TAG}+${V} build#${BUILD_NUMBER} commit=${SHA} platforms=${PLATFORMS}" "images pushed: ${IMAGE_NAME}:${TAG}, ${IMAGE_NAME}:${V}"
