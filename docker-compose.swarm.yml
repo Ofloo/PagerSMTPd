@@ -1,17 +1,42 @@
 # Docker Swarm stack file — deploy with:
+#   set -a; . ./.env; set +a
 #   docker stack deploy -c docker-compose.swarm.yml pagersmtp
-# Requires the image to be pushed first: ./build.sh  (ofloo/pagersmtpd:<tag>)
-# and a .env next to this file (same variables as .env.example).
+#
+# NOTE: `docker stack deploy` does NOT support env_file; variables are
+# interpolated from the deploying shell, so export .env first (see above).
+# The image must already be pushed: ./build.sh  (ofloo/pagersmtpd:<tag>).
 #
 # MX semantics: published port 25 in host mode, exactly 1 replica pinned to a
 # labelled node, so inbound port 25 lands directly on this container.
 services:
   pager-smtpd:
     image: ofloo/pagersmtpd:${TAG:-latest}
-    env_file: .env
     environment:
+      PAGER_DOMAIN: ${PAGER_DOMAIN:?PAGER_DOMAIN is required}
+      PAGER_URL: ${PAGER_URL:-https://pager.ofloo.io}
+      SHARE_URL: ${SHARE_URL:-https://share.h4ck.io}
+      PAGER_SESSION_ID: ${PAGER_SESSION_ID:-}
+      PAGER_PROJECT: ${PAGER_PROJECT:-smtp}
+      MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-60000}
+      MAX_ATTACHMENT_BYTES: ${MAX_ATTACHMENT_BYTES:-104857600}
+      MAX_ATTACHMENTS: ${MAX_ATTACHMENTS:-10}
+      MAX_TOTAL_BYTES: ${MAX_TOTAL_BYTES:-105457600}
+      SHARE_TIMEOUT_SECONDS: ${SHARE_TIMEOUT_SECONDS:-60}
+      PAGER_TIMEOUT_SECONDS: ${PAGER_TIMEOUT_SECONDS:-15}
+      RATE_LIMIT_MESSAGES: ${RATE_LIMIT_MESSAGES:-20}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SMTP_HOST: 0.0.0.0
       SMTP_PORT: "8025"
+    # Run directly as non-root (no root, no capabilities at all).
+    user: "${PAGER_UID:-10000}:${PAGER_GID:-10000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - target: 8025
         published: ${SMTP_PUBLISHED_PORT:-25}
@@ -31,9 +56,10 @@ services:
         order: stop-first
         parallelism: 1
     healthcheck:
-      test: ["CMD", "python3", "-c", "import socket;s=socket.create_connection(('127.0.0.1',8025),2);s.close()"]
+      test: ["CMD", "python3", "-c", "import socket;s=socket.create_connection(('127.0.0.1',8025),3);s.close()"]
       interval: 30s
       timeout: 5s
+      start_period: 10s
       retries: 3
     logging:
       driver: json-file

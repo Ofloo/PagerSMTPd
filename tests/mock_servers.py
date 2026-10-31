@@ -14,6 +14,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 STATE = {"notify": [], "share": {}}
 
 
+def control() -> dict:
+    """Optional per-request behaviour file, so tests can force error codes."""
+    path = os.environ.get("MOCK_CONTROL_FILE")
+    if not path:
+        return {}
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
 class PagerHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -27,12 +39,13 @@ class PagerHandler(BaseHTTPRequestHandler):
                 self.send_response(401)
                 self.end_headers()
                 return
+            status = int(control().get("notify_status", 202))
             mailbox = auth.removeprefix("Bearer ").strip()
             payload = json.loads(body.decode("utf-8"))
             STATE["notify"].append({"mailbox": mailbox, "payload": payload})
-            self.send_response(202)
+            self.send_response(status)
             self.end_headers()
-            self.wfile.write(b"accepted")
+            self.wfile.write(b"mock notify")
         else:
             self.send_response(404)
             self.end_headers()
@@ -45,9 +58,11 @@ class ShareHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        status = int(control().get("share_status", 200))
         name = self.path.lstrip("/")
-        STATE["share"][name] = body
-        self.send_response(200)
+        if 200 <= status < 300:
+            STATE["share"][name] = body
+        self.send_response(status)
         self.end_headers()
         export = os.environ.get("MOCK_EXPORT_HOST", "127.0.0.1")
         self.wfile.write(f"http://{export}:{self.server.server_port}/{name}".encode())

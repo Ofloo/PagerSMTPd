@@ -3,11 +3,15 @@
 # Copyright (c) 2026 Wouter Snels
 set -euo pipefail
 
+# Always operate from the repo root, regardless of the caller's cwd.
+cd "$(dirname "$0")"
+
 # Configuration
 IMAGE_NAME="ofloo/pagersmtpd"
 DEFAULT_TAG="latest"
 PLATFORMS="linux/amd64,linux/arm64"
 BUILDER_NAME="multiarch-builder"
+HAILO_BUILD=0
 
 # Parse command line arguments
 TAG="${1:-$DEFAULT_TAG}"
@@ -26,6 +30,7 @@ if [[ "$TAG" == *"-hailo"* ]]; then
     echo "🔧 Hailo build detected - limiting to ARM64"
     PLATFORMS="linux/arm64"
     BUILD_ARGS+=" --build-arg HAILO_BUILD=true"
+    HAILO_BUILD=1
 fi
 
 # Log configuration
@@ -70,8 +75,12 @@ trap 'notify_pager failed "build interrupted: ${IMAGE_NAME}:${TAG} build#${BUILD
 # Build and push; capture output for logs.
 # Every build pushes BOTH the requested tag AND the version tag v<VERSION>,
 # so a release always has a pinned image (e.g. ofloo/pagersmtpd:v0.1.0).
+# A Hailo (arm64-only) build must NOT overwrite the multiarch version tag.
 V="v$(tr -d ' \n' < VERSION 2>/dev/null || true)"
 [[ "$V" == "v" ]] && V="v${TAG}"
+if [[ "$HAILO_BUILD" == "1" ]]; then
+    V="${V}-hailo"
+fi
 TAGS=("-t" "${IMAGE_NAME}:${TAG}")
 if [[ "$V" != "v${TAG}" ]]; then
     TAGS+=("-t" "${IMAGE_NAME}:${V}")
@@ -90,13 +99,14 @@ if docker buildx build \
 else
     BUILD_OK=0
 fi
-rm -f "$BUILD_LOG"
 
 if [[ "$BUILD_OK" != "1" ]]; then
     echo "❌ Build failed — no release commit, no tag."
-    notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 50 /dev/null 2>/dev/null || echo 'see docker buildx output above')"
+    notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 50 "$BUILD_LOG" 2>/dev/null || true)"
+    rm -f "$BUILD_LOG"
     exit 1
 fi
+rm -f "$BUILD_LOG"
 trap - ERR INT TERM
 
 echo "✅ Successfully built and pushed ${IMAGE_NAME}:${TAG} + ${IMAGE_NAME}:${V} for ${PLATFORMS}"

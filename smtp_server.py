@@ -53,6 +53,12 @@ SMTP_PORT = env_int("SMTP_PORT", 8025)
 MAX_MESSAGE_BYTES = env_int("MAX_MESSAGE_BYTES", 60000)
 MAX_ATTACHMENT_BYTES = env_int("MAX_ATTACHMENT_BYTES", 104857600)  # 100 MB
 MAX_ATTACHMENTS = env_int("MAX_ATTACHMENTS", 10)
+# Hard cap on the whole DATA blob (headers + text + all attachments). This is
+# what the server advertises in EHLO SIZE and buffers in memory; without it a
+# sender could push MAX_ATTACHMENT_BYTES * MAX_ATTACHMENTS (~1 GB) into RAM.
+MAX_TOTAL_BYTES = env_int(
+    "MAX_TOTAL_BYTES", MAX_MESSAGE_BYTES + MAX_ATTACHMENT_BYTES
+)
 SHARE_TIMEOUT_SECONDS = env_int("SHARE_TIMEOUT_SECONDS", 60)
 PAGER_TIMEOUT_SECONDS = env_int("PAGER_TIMEOUT_SECONDS", 15)
 RATE_LIMIT_MESSAGES = env_int("RATE_LIMIT_MESSAGES", 20)
@@ -63,6 +69,7 @@ PROJECT = os.environ.get("PAGER_PROJECT", "smtp")
 if not PAGER_DOMAIN:
     print("FATAL: PAGER_DOMAIN environment variable is required", file=sys.stderr)
     sys.exit(2)
+
 ALLOW_INSECURE = os.environ.get("PAGER_ALLOW_INSECURE", "") == "1"
 
 
@@ -85,10 +92,24 @@ logging.basicConfig(
 )
 
 _rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+_rate_calls = 0
+
+
+def _prune_rate_buckets(now: float) -> None:
+    """Drop buckets for peers that went quiet, so memory stays bounded."""
+    horizon = RATE_LIMIT_WINDOW_SECONDS * 4
+    stale = [key for key, bucket in _rate_buckets.items()
+             if not bucket or now - bucket[-1] > horizon]
+    for key in stale:
+        _rate_buckets.pop(key, None)
 
 
 def rate_limited(peer: str) -> bool:
+    global _rate_calls
     now = time.monotonic()
+    _rate_calls += 1
+    if _rate_calls % 100 == 0:
+        _prune_rate_buckets(now)
     bucket = _rate_buckets[peer]
     while bucket and now - bucket[0] > RATE_LIMIT_WINDOW_SECONDS:
         bucket.popleft()
@@ -96,6 +117,16 @@ def rate_limited(peer: str) -> bool:
         return True
     bucket.append(now)
     return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: a 3xx on a PUT must not silently become a GET."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def safe_filename(name: str) -> str:
@@ -106,16 +137,19 @@ def safe_filename(name: str) -> str:
 
 def https_request(
     method: str, url: str, timeout: int, data: bytes | None = None,
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None, max_response: int = 8192,
 ) -> tuple[int, bytes]:
     req = urllib.request.Request(url, data=data, method=method)
     for key, value in (headers or {}).items():
         req.add_header(key, value)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+        with _OPENER.open(req, timeout=timeout) as resp:
+            return resp.status, resp.read(max_response)
     except urllib.error.HTTPError as exc:
-        body = exc.read() if exc.fp else b""
+        try:
+            body = exc.read(max_response) if exc.fp else b""
+        except Exception:
+            body = b""
         return exc.code, body
 
 
@@ -130,6 +164,8 @@ def upload_attachment(filename: str, payload: bytes) -> str:
     )
     if 200 <= status < 300:
         url = body.decode("utf-8", "replace").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            url = f"{SHARE_URL}/{name}"
         LOG.info("attachment %s uploaded (%d bytes) -> %s", filename, len(payload), url)
         return url
     raise RuntimeError(f"share upload failed for {filename!r}: HTTP {status}")
@@ -177,6 +213,7 @@ def notify_pager(mailbox_uuid: str, payload: dict) -> tuple[int, str]:
             "Authorization": f"Bearer {mailbox_uuid}",
             "Content-Type": "application/json",
         },
+        max_response=2048,
     )
     return status, resp_body.decode("utf-8", "replace")[:500]
 
@@ -210,23 +247,28 @@ class PagerHandler:
 
     async def handle_DATA(self, server, session, envelope):
         peer = session.peer[0] if session.peer else "unknown"
+        try:
+            return self._process(peer, envelope)
+        except Exception:
+            LOG.exception("unhandled error processing DATA from %s", peer)
+            return "451 4.3.0 temporary local error, try again later"
+
+    def _process(self, peer: str, envelope) -> str:
         raw = envelope.content
+        if len(raw) > MAX_TOTAL_BYTES:
+            LOG.info("DATA from %s too large: %d bytes > %d", peer, len(raw), MAX_TOTAL_BYTES)
+            return f"550 5.3.4 message too large ({len(raw)} > {MAX_TOTAL_BYTES} bytes)"
+
         msg = email.message_from_bytes(raw, policy=email.policy.default)
 
         # Message size limit applies to headers + text body only.
         # Attachments go to SHARE_URL under their own (much larger) limit.
-        text_bytes = len(msg.get("Subject", "").encode()) + len(str(msg.get("From", "")).encode())
+        text_bytes = len(str(msg.get("Subject", "")).encode())
+        text_bytes += len(str(msg.get("From", "")).encode())
         text_bytes += len(extract_text(msg).encode("utf-8", "replace"))
         if text_bytes > MAX_MESSAGE_BYTES:
             LOG.info("message from %s too large: %d bytes > %d", peer, text_bytes, MAX_MESSAGE_BYTES)
             return f"550 5.3.4 message too large ({text_bytes} > {MAX_MESSAGE_BYTES} bytes)"
-
-        mailbox = envelope.rcpt_tos[0]
-        local = mailbox.rpartition("@")[0]
-
-        subject = str(msg.get("Subject", ""))
-        sender = str(msg.get("From", ""))
-        message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
 
         attachments = extract_attachments(msg)
         if len(attachments) > MAX_ATTACHMENTS:
@@ -243,6 +285,7 @@ class PagerHandler:
                     f"({name}: {len(payload)} > {MAX_ATTACHMENT_BYTES} bytes)"
                 )
 
+        # Upload once, reuse the URLs for every recipient on this transaction.
         attachment_urls: list[str] = []
         log_notes: list[str] = []
         for name, payload in attachments:
@@ -252,46 +295,59 @@ class PagerHandler:
                 LOG.error("attachment upload failed: %s", exc)
                 log_notes.append(f"attachment upload failed: {name}: {exc}")
 
+        subject = str(msg.get("Subject", ""))
+        sender = str(msg.get("From", ""))
+        message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
         body_text = extract_text(msg)
         logs = body_text[:4000]
         if log_notes:
             logs = (logs + "\n" + "\n".join(log_notes)).strip()
 
-        payload = {
-            "PROJECT": PROJECT,
-            "JOB_ID": message_id,
-            "status": "received",
-            "message": f"Mail from {sender} — {subject}".strip(" —"),
-            "logs": logs,
-            "attachments": attachment_urls,
-            "source": "smtp",
-            "rcpt": mailbox,
-        }
+        recipients = sorted({addr.rpartition("@")[0].lower() for addr in envelope.rcpt_tos})
+        permanent = False
+        temporary = False
+        for local in recipients:
+            payload = {
+                "PROJECT": PROJECT,
+                "JOB_ID": message_id,
+                "status": "received",
+                "message": f"Mail from {sender} — {subject}".strip(" —"),
+                "logs": logs,
+                "attachments": attachment_urls,
+                "source": "smtp",
+                "rcpt": f"{local}@{PAGER_DOMAIN}",
+            }
+            try:
+                status, resp = notify_pager(local, payload)
+            except Exception as exc:
+                LOG.error("pager notify network error for %s: %s", local, exc)
+                temporary = True
+                continue
 
-        try:
-            status, resp = notify_pager(local, payload)
-        except Exception as exc:
-            LOG.error("pager notify network error for %s: %s", mailbox, exc)
+            if 200 <= status < 300:
+                LOG.info("forwarded mail from %s to pager mailbox %s (HTTP %d)", peer, local, status)
+            elif status == 429:
+                LOG.warning("pager 429 full mailbox %s", local)
+                temporary = True
+            elif 400 <= status < 500:
+                LOG.error("pager rejected %s (HTTP %d): %s", local, status, resp)
+                permanent = True
+            else:
+                LOG.error("pager server error for %s (HTTP %d): %s", local, status, resp)
+                temporary = True
+
+        if temporary:
             return "451 4.3.0 temporary failure contacting pager, try again later"
-
-        if 200 <= status < 300:
-            LOG.info("forwarded mail from %s to pager mailbox %s (HTTP %d)", peer, local, status)
-            return "250 OK queued for delivery to pager"
-        if status == 429:
-            LOG.warning("pager 429 full mailbox %s", local)
-            return "451 4.3.0 mailbox full, try again later"
-        if 400 <= status < 500:
-            LOG.error("pager rejected (HTTP %d): %s", status, resp)
-            return f"550 5.3.0 pager rejected message (HTTP {status})"
-        LOG.error("pager server error (HTTP %d): %s", status, resp)
-        return "451 4.3.0 pager temporary failure, try again later"
+        if permanent:
+            return "550 5.3.0 pager rejected message"
+        return "250 OK queued for delivery to pager"
 
 
 class PagerController(Controller):
     def factory(self):
         return SMTPServer(
             self.handler,
-            data_size_limit=MAX_MESSAGE_BYTES + MAX_ATTACHMENT_BYTES * MAX_ATTACHMENTS + 1048576,
+            data_size_limit=MAX_TOTAL_BYTES,
             decode_data=False,
         )
 
@@ -299,9 +355,9 @@ class PagerController(Controller):
 def main() -> None:
     LOG.info(
         "starting receive-only SMTP on %s:%d domain=%s pager=%s share=%s "
-        "max_msg=%d max_att=%d rate=%d/%ds session_lock=%s",
+        "max_total=%d max_msg=%d max_att=%d max_attachments=%d rate=%d/%ds session_lock=%s",
         SMTP_HOST, SMTP_PORT, PAGER_DOMAIN, PAGER_URL, SHARE_URL,
-        MAX_MESSAGE_BYTES, MAX_ATTACHMENT_BYTES,
+        MAX_TOTAL_BYTES, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS,
         RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW_SECONDS,
         PAGER_SESSION_ID or "any-uuid",
     )

@@ -5,19 +5,23 @@ import email.policy
 import json
 import os
 import smtplib
+import socket
 import subprocess
 import sys
 import time
 import uuid
 from email.message import EmailMessage
 
-HOST, PORT = "127.0.0.1", 18025
+HOST = "127.0.0.1"
+PORT = 18025
 STATE_FILE = sys.argv[1]
+CONTROL_FILE = sys.argv[2] if len(sys.argv) > 2 else None
 DOMAIN = "test.local"
 VALID_UUID = str(uuid.uuid4())
 SESSION_UUID = str(uuid.uuid4())
 
 failures = []
+procs = []
 
 
 def check(name, cond, detail=""):
@@ -26,17 +30,49 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def send(rcpt, data: bytes, expect_smtp_code=None):
-    s = smtplib.SMTP(HOST, PORT, timeout=10)
+def set_control(**values):
+    if not CONTROL_FILE:
+        return
+    with open(CONTROL_FILE, "w") as fh:
+        json.dump(values, fh)
+
+
+def start_server(port, **env_over):
+    env = dict(os.environ)
+    env.update({k: str(v) for k, v in env_over.items()})
+    env["SMTP_PORT"] = str(port)
+    proc = subprocess.Popen(
+        [sys.executable, "smtp_server.py"], env=env,
+        stdout=open(f"/tmp/pagersmtpd-test-{port}.log", "w"), stderr=subprocess.STDOUT,
+    )
+    procs.append(proc)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"server on {port} exited early, see /tmp/pagersmtpd-test-{port}.log")
+        try:
+            s = socket.create_connection((HOST, port), timeout=0.3)
+            s.close()
+            return proc
+        except OSError:
+            time.sleep(0.1)
+    raise RuntimeError(f"server on {port} did not start")
+
+
+def send(rcpt, data: bytes, port=PORT, extra_rcpts=()):
+    s = smtplib.SMTP(HOST, port, timeout=15)
     s.ehlo("tester")
     try:
         code, msg = s.docmd("MAIL", "FROM:<sender@example.org>")
         assert code == 250, (code, msg)
-        code, msg = s.docmd("RCPT", f"TO:<{rcpt}>")
-        if (expect_smtp_code is not None and expect_smtp_code >= 500) or code >= 500:
-            return code, msg
-        assert code == 250, (code, msg)
+        for addr in (rcpt, *extra_rcpts):
+            code, msg = s.docmd("RCPT", f"TO:<{addr}>")
+            if code >= 500:
+                return code, msg
+            assert code == 250, (code, msg)
         code, msg = s.docmd("DATA")
+        if code >= 500:
+            return code, msg
         assert code == 354, (code, msg)
         s.send(data + b"\r\n.\r\n")
         code, msg = s.docmd("")
@@ -58,23 +94,22 @@ def state():
     raise RuntimeError("state file not readable")
 
 
-def build_mail(subject="hello", body="test body", attach=None, attach_size=None):
+def build_mail(rcpt=None, subject="hello", body="test body", attach=None, filename="file.bin"):
     m = EmailMessage()
     m["From"] = "sender@example.org"
-    m["To"] = f"{VALID_UUID}@{DOMAIN}"
+    m["To"] = rcpt or f"{VALID_UUID}@{DOMAIN}"
     m["Subject"] = subject
     m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
     m.set_content(body)
     if attach is not None:
-        m.add_attachment(attach, maintype="application", subtype="octet-stream",
-                         filename="file.bin" if attach_size is None else attach_size)
+        m.add_attachment(attach, maintype="application", subtype="octet-stream", filename=filename)
     return m.as_bytes(policy=email.policy.SMTP)  # CRLF line endings
 
 
 # 1. valid uuid -> accepted, forwarded to pager
 code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail())
 check("valid uuid RCPT+DATA accepted (250)", code == 250, f"{code} {msg}")
-time.sleep(0.5)
+time.sleep(0.4)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID]
 check("pager received notify with Bearer uuid", len(notes) == 1)
@@ -97,23 +132,27 @@ check("invalid uuid rejected (550)", code == 550, f"{code} {msg}")
 code, msg = send("victim@evil.example", build_mail())
 check("external relay attempt rejected (550)", code == 550, f"{code} {msg}")
 
-# 5. VRFY refused
+# 5. VRFY refused / no AUTH advertised
 s = smtplib.SMTP(HOST, PORT, timeout=10)
 s.ehlo("tester")
 code, msg = s.docmd("VRFY", "someone")
 check("VRFY answered without leaking (252/502)", code in (252, 502), f"{code} {msg}")
 s.quit()
+s = smtplib.SMTP(HOST, PORT, timeout=10)
+_, ehlo = s.ehlo("tester")
+check("AUTH is not advertised on a public MX", b"AUTH" not in ehlo)
+check("SIZE advertised equals MAX_TOTAL_BYTES", b"SIZE 105457600" in ehlo, ehlo.decode()[:120])
+s.quit()
 
 # 6. message too large -> 550
-big = build_mail(body="A" * 70000)  # text body > MAX_MESSAGE_BYTES -> 550
-code, msg = send(f"{VALID_UUID}@{DOMAIN}", big)
-check("oversized DATA rejected (550)", code == 550 and b"too large" in msg.lower(), f"{code} {msg}")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(body="A" * 70000))
+check("oversized text body rejected (550)", code == 550 and b"too large" in msg.lower(), f"{code} {msg}")
 
 # 7. attachment upload -> share URL in pager payload
 att = b"\x00\x01attachment-bytes" * 100
 code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="with-att", attach=att))
 check("mail with attachment accepted", code == 250, f"{code} {msg}")
-time.sleep(0.7)
+time.sleep(0.5)
 st = state()
 notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "with-att" in n["payload"]["message"]]
 check("pager got mail with attachment", len(notes) == 1)
@@ -124,54 +163,108 @@ check("share mock stored the file", len(st["share"]) >= 1, str(list(st["share"])
 if st["share"]:
     check("share content matches", any(v.encode("latin-1") == att for v in st["share_bodies"].values()))
 
-# 8. big-but-under-limit attachment passes (1 MB); over-limit attachment is
-#    tested on a second instance with MAX_ATTACHMENT_BYTES=1024 in section 8b.
+# 8. big-but-under-limit attachment passes (1 MB)
 big_att = os.urandom(1024 * 1024)
 code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="big-att-ok", attach=big_att))
 check("1MB attachment accepted", code == 250, f"{code} {msg}")
 
-# 8b. small-attachment-limit instance: attachment > limit -> 550 attachment too large
-env = dict(os.environ)
-env["SMTP_PORT"] = "18027"
-env.pop("PAGER_SESSION_ID", None)
-env["MAX_ATTACHMENT_BYTES"] = "1024"
-proc3 = subprocess.Popen([sys.executable, "smtp_server.py"], env=env,
-                         stdout=open("/tmp/smtp3.log", "w"), stderr=subprocess.STDOUT)
-time.sleep(1)
-try:
-    s = smtplib.SMTP(HOST, 18027, timeout=10)
-    s.ehlo("t")
-    s.docmd("MAIL", "FROM:<a@b.c>")
-    s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
-    s.docmd("DATA")
-    s.send(build_mail(subject="att-too-big", attach=b"Z" * 2048) + b"\r\n.\r\n")
-    code, msg = s.docmd("")
-    check("oversized attachment rejected (550 too large)", code == 550 and b"attachment too large" in msg.lower(), f"{code} {msg}")
-    s.quit()
-finally:
-    proc3.terminate()
-    proc3.wait(timeout=5)
+# 9. multiple recipients in one transaction: one upload, both mailboxes notified
+rcpt_a, rcpt_b = str(uuid.uuid4()), str(uuid.uuid4())
+tag = uuid.uuid4().hex[:8]
+code, msg = send(
+    f"{rcpt_a}@{DOMAIN}",
+    build_mail(subject=f"multi-{tag}", attach=b"MULTI-ATT"),
+    extra_rcpts=(f"{rcpt_b}@{DOMAIN}",),
+)
+check("multi-recipient transaction accepted", code == 250, f"{code} {msg}")
+time.sleep(0.5)
+st = state()
+a_notes = [n for n in st["notify"] if n["mailbox"] == rcpt_a and tag in n["payload"]["message"]]
+b_notes = [n for n in st["notify"] if n["mailbox"] == rcpt_b and tag in n["payload"]["message"]]
+check("both recipients notified", len(a_notes) == 1 and len(b_notes) == 1)
+if a_notes and b_notes:
+    check("both got the same attachment URL",
+          a_notes[0]["payload"]["attachments"] == b_notes[0]["payload"]["attachments"],
+          f"{a_notes[0]['payload']['attachments']} vs {b_notes[0]['payload']['attachments']}")
 
-# 9. PAGER_SESSION_ID lock: start second instance with lock and test
-import subprocess
-env = dict(os.environ)
-env["PAGER_SESSION_ID"] = SESSION_UUID
-env["SMTP_PORT"] = "18026"
-proc = subprocess.Popen([sys.executable, "smtp_server.py"], env=env,
-                        stdout=open("/tmp/smtp2.log", "w"), stderr=subprocess.STDOUT)
-time.sleep(1)
-try:
-    s = smtplib.SMTP(HOST, 18026, timeout=10)
-    s.ehlo("t")
+# 10. pager error mapping (429/5xx -> 451, 4xx -> 550)
+set_control(notify_status=429)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="pager-429"))
+check("pager 429 -> 451", code == 451, f"{code} {msg}")
+set_control(notify_status=500)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="pager-500"))
+check("pager 5xx -> 451", code == 451, f"{code} {msg}")
+set_control(notify_status=401)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="pager-401"))
+check("pager 4xx -> 550 (permanent)", code == 550, f"{code} {msg}")
+
+# 11. share failure: mail still accepted, URL absent, note in logs
+set_control(share_status=500)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", build_mail(subject="share-fail", attach=b"FAILED-UPLOAD"))
+check("share failure does not reject the mail", code == 250, f"{code} {msg}")
+time.sleep(0.5)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "share-fail" in n["payload"]["message"]]
+check("share failure recorded in logs", bool(notes) and "attachment upload failed" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "no note")
+if notes:
+    check("no attachments[] on failed upload", notes[0]["payload"]["attachments"] == [])
+set_control()
+
+# 12. oversized attachment (small limit instance)
+start_server(18027, MAX_ATTACHMENT_BYTES=1024)
+s = smtplib.SMTP(HOST, 18027, timeout=15)
+s.ehlo("t")
+s.docmd("MAIL", "FROM:<a@b.c>")
+s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
+s.docmd("DATA")
+s.send(build_mail(subject="att-too-big", attach=b"Z" * 2048) + b"\r\n.\r\n")
+code, msg = s.docmd("")
+check("oversized attachment rejected (550 too large)", code == 550 and b"attachment too large" in msg.lower(), f"{code} {msg}")
+s.quit()
+
+# 13. total DATA cap (small MAX_TOTAL_BYTES instance) -> rejected before buffering
+start_server(18028, MAX_TOTAL_BYTES=5000)
+s = smtplib.SMTP(HOST, 18028, timeout=15)
+s.ehlo("t")
+s.docmd("MAIL", "FROM:<a@b.c>")
+s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
+s.docmd("DATA")
+s.send(build_mail(subject="total-cap", attach=b"Q" * 20000) + b"\r\n.\r\n")
+code, msg = s.docmd("")
+check("total DATA cap rejected (550/552)", code in (550, 552), f"{code} {msg}")
+s.quit()
+
+# 14. rate limit (limit=2 instance) -> 3rd RCPT is 451
+start_server(18029, RATE_LIMIT_MESSAGES=2)
+s = smtplib.SMTP(HOST, 18029, timeout=15)
+s.ehlo("t")
+codes = []
+for _ in range(3):
     s.docmd("MAIL", "FROM:<a@b.c>")
-    code, msg = s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
-    check("locked: other uuid rejected (550)", code == 550, f"{code} {msg}")
-    code, msg = s.docmd("RCPT", f"TO:<{SESSION_UUID}@{DOMAIN}>")
-    check("locked: session uuid accepted (250)", code == 250, f"{code} {msg}")
-    s.quit()
-finally:
+    codes.append(s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")[0])
+    s.docmd("RSET")
+check("rate limit: first two accepted, third 451", codes == [250, 250, 451], str(codes))
+s.quit()
+
+# 15. PAGER_SESSION_ID lock
+start_server(18026, PAGER_SESSION_ID=SESSION_UUID)
+s = smtplib.SMTP(HOST, 18026, timeout=15)
+s.ehlo("t")
+s.docmd("MAIL", "FROM:<a@b.c>")
+code, msg = s.docmd("RCPT", f"TO:<{VALID_UUID}@{DOMAIN}>")
+check("locked: other uuid rejected (550)", code == 550, f"{code} {msg}")
+code, msg = s.docmd("RCPT", f"TO:<{SESSION_UUID}@{DOMAIN}>")
+check("locked: session uuid accepted (250)", code == 250, f"{code} {msg}")
+s.quit()
+
+for proc in procs:
     proc.terminate()
-    proc.wait(timeout=5)
+for proc in procs:
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
 
 if failures:
     print(f"\n{len(failures)} FAILURES: {failures}")
