@@ -224,6 +224,38 @@ check("forwarded .eml not uploaded as attachment", bool(notes) and notes[0]["pay
       str(notes[0]["payload"]["attachments"]) if notes else "missing")
 check("forwarded headers not in logs", bool(notes) and "X-Spam-Status" not in notes[0]["payload"]["logs"])
 
+# 1h. empty text/plain + filled text/html -> HTML body must be used
+m = EmailMessage()
+m["From"] = "emptyplain@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "empty-plain"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m.set_content("")  # empty text/plain
+m.add_alternative("<html><body><p>HTML fallback tekst</p></body></html>", subtype="html")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+check("empty-plain mail accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "empty-plain" in n["payload"]["message"]]
+check("empty text/plain falls back to HTML body",
+      bool(notes) and "HTML fallback tekst" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "missing")
+
+# 1i. quoted-printable body (Thunderbird default) decodes correctly
+qp = EmailMessage()
+qp["From"] = "qp@example.org"
+qp["To"] = f"{VALID_UUID}@{DOMAIN}"
+qp["Subject"] = "qp-body"
+qp["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+qp.set_content("Regel met aanhalingstekens en klemborden: \"x\" en = einde.\nTweede regel.")
+qp.replace_header("Content-Transfer-Encoding", "quoted-printable")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", qp.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "qp-body" in n["payload"]["message"]]
+check("quoted-printable body decoded", bool(notes) and "Regel met aanhalingstekens" in notes[0]["payload"]["logs"],
+      notes[0]["payload"]["logs"][:120] if notes else "missing")
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")

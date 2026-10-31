@@ -253,8 +253,10 @@ def extract_text(msg: Message) -> str:
     else:
         collect(msg)
 
-    if plain:
-        return "\n".join(plain).strip()
+    plain_text = "\n".join(plain).strip()
+    if plain_text:
+        return plain_text
+    # Many clients send an empty text/plain part next to a filled text/html one.
     if html_parts:
         return html_to_text("\n".join(html_parts)).strip()
     return ""
@@ -308,13 +310,20 @@ def clean_text(text: str) -> str:
 
 
 def html_to_text(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", html)
-    html = re.sub(r"<[^>]+>", " ", html)
     import html as htmlmod
-    html = htmlmod.unescape(html)
-    return re.sub(r"[ \t]{2,}", " ", html)
+
+    html = re.sub(r"(?is)<(script|style|head)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</(p|div|tr|li|h[1-6]|blockquote|table)>", "\n", html)
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = htmlmod.unescape(html).replace("\xa0", " ")
+    lines = []
+    for line in html.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    text = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def sender_address(sender_header: str) -> str:
