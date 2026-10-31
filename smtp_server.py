@@ -497,6 +497,19 @@ class PagerHandler:
 
 
 class PagerController(Controller):
+    def _trigger_server(self):
+        """Connect to loopback to force the factory to run.
+
+        aiosmtpd connects to self.hostname, but the wildcard address
+        (0.0.0.0/::) is not connectable on FreeBSD. Docker also needs the
+        server bound to the wildcard, so only the probe is redirected.
+        """
+        host = self.hostname
+        if host in (None, "", "0.0.0.0", "::"):
+            host = "127.0.0.1"
+        with _socket.create_connection((host, self.port), 1.0) as sock:
+            sock.recv(1024)
+
     def factory(self):
         return SMTPServer(
             self.handler,
@@ -515,12 +528,8 @@ def main() -> None:
         MAX_TOTAL_BYTES, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS,
         RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW_SECONDS,
     )
-    # aiosmtpd's readiness check connects to `hostname`; connecting to the
-    # wildcard address fails on FreeBSD (ENETUNREACH). Bind to all interfaces
-    # by passing None, so the check uses 127.0.0.1 instead.
-    bind_host = None if SMTP_HOST in ("0.0.0.0", "::", "") else SMTP_HOST
     controller = PagerController(
-        PagerHandler(), hostname=bind_host, port=SMTP_PORT
+        PagerHandler(), hostname=SMTP_HOST, port=SMTP_PORT
     )
     controller.start()
     LOG.info("listening on %s:%d", SMTP_HOST, SMTP_PORT)
