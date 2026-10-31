@@ -1,0 +1,8 @@
+PagerSMPTd is a receive-only SMTP catch-all for a single domain. Mail addressed
+to <uuid>@<PAGER_DOMAIN> is forwarded to PagerMCP (HTTPS POST /notify, with the
+uuid as bearer token) and attachments are uploaded to a share endpoint
+(default https://share.h4ck.io) with the resulting URLs in the page payload.
+
+It never sends SMTP, cannot relay, and only makes outbound HTTPS connections to
+PAGER_URL and SHARE_URL. Configuration is entirely via environment variables in
+/usr/local/etc/pagersmtpd.env.

@@ -1,0 +1,85 @@
+#!/bin/sh
+
+# PROVIDE: pagersmtpd
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="pagersmtpd"
+rcvar="pagersmtpd_enable"
+pidfile="/var/run/${name}.pid"
+
+: "${pagersmtpd_enable:=NO}"
+: "${pagersmtpd_envfile:=/usr/local/etc/pagersmtpd.env}"
+: "${pagersmtpd_user:=pager}"
+: "${pagersmtpd_group:=pager}"
+: "${pagersmtpd_uid:=10000}"
+: "${pagersmtpd_gid:=10000}"
+
+pagersmtpd_precmd() {
+    if [ -r "${pagersmtpd_envfile}" ]; then
+        set -a
+        . "${pagersmtpd_envfile}"
+        set +a
+    else
+        echo "${name}: ${pagersmtpd_envfile} missing — see pagersmtpd.env.default" >&2
+        return 1
+    fi
+    if ! pw groupshow "${pagersmtpd_group}" >/dev/null 2>&1; then
+        pw groupadd "${pagersmtpd_group}" -g "${pagersmtpd_gid}" 2>/dev/null || true
+    fi
+    if ! pw usershow "${pagersmtpd_user}" >/dev/null 2>&1; then
+        pw useradd "${pagersmtpd_user}" -u "${pagersmtpd_uid}" -g "${pagersmtpd_group}" \
+            -d /nonexistent -s /usr/sbin/nologin -h - 2>/dev/null || true
+    fi
+    install -d -o "${pagersmtpd_user}" -g "${pagersmtpd_group}" /var/run/pagersmtpd
+}
+
+start_cmd="pagersmtpd_start"
+stop_cmd="pagersmtpd_stop"
+status_cmd="pagersmtpd_status"
+restart_cmd="pagersmtpd_restart"
+
+pagersmtpd_start() {
+    pagersmtpd_precmd || return 1
+    # Already running: report success so automation (Bastille, Ansible) is happy.
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "${name} already running (pid $(cat "$pidfile"))."
+        return 0
+    fi
+    rm -f "$pidfile"
+    echo "Starting ${name} as ${pagersmtpd_user}."
+    /usr/sbin/daemon -u "${pagersmtpd_user}" -p "/var/run/${name}.pid" \
+        /usr/local/bin/python3 /usr/local/lib/pagersmtpd/smtp_server.py
+}
+
+pagersmtpd_stop() {
+    if [ -f "$pidfile" ]; then
+        pid=$(cat "$pidfile")
+        echo "Stopping ${name} (pid ${pid})."
+        kill "$pid" 2>/dev/null || true
+        rm -f "$pidfile"
+    else
+        echo "${name} is not running."
+    fi
+    return 0
+}
+
+pagersmtpd_status() {
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "${name} is running as pid $(cat "$pidfile")."
+        return 0
+    fi
+    echo "${name} is not running."
+    return 1
+}
+
+pagersmtpd_restart() {
+    pagersmtpd_stop
+    sleep 1
+    pagersmtpd_start
+}
+
+load_rc_config "${name}"
+run_rc_command "$@"

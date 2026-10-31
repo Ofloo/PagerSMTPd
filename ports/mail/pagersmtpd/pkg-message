@@ -1,0 +1,19 @@
+PagerSMPTd is installed.
+
+Configure it:
+
+  1) cp /usr/local/etc/pagersmtpd.env.sample /usr/local/etc/pagersmtpd.env
+     edit PAGER_DOMAIN (required), PAGER_URL, SHARE_URL, limits
+
+  2) sysrc pagersmtpd_enable=YES
+     service pagersmtpd start
+
+  3) For an MX on a real interface, point the domain's MX at this host and
+     forward port 25 to the service (SMTP_PORT defaults to 8025 so the daemon
+     runs unprivileged). Example pf rule for a jail / port redirect:
+
+       rdr on $ext_if inet proto tcp from any to ($ext_if) port 25 \
+           -> 127.0.0.1 port 8025
+
+The service runs as the unprivileged user "pager" (uid/gid 10000). Override
+with: sysrc pagersmtpd_uid=... pagersmtpd_gid=... pagersmtpd_user=...

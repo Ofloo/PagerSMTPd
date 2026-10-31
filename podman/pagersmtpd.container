@@ -1,0 +1,34 @@
+[Unit]
+Description=PagerSMPTd — receive-only SMTP catch-all to PagerMCP
+Documentation=https://github.com/Ofloo/PagerSMTPd
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+# The Docker image is OCI-compatible and runs unchanged under Podman.
+Image=docker.io/ofloo/pagersmtpd:latest
+ContainerName=pagersmtpd
+AutoUpdate=registry
+
+# One KEY=value per line, same variables as .env.example
+EnvironmentFile=%h/.config/pagersmtpd/pagersmtpd.env
+
+# Published port: 8025 inside (unprivileged), 25 on the host.
+# Rootless Podman cannot bind <1024 unless
+#   sysctl net.ipv4.ip_unprivileged_port_start=0
+# (or run this quadlet as a system unit under root).
+PublishPort=25:8025
+
+# Same hardening as docker-compose.yml. The image starts as root only to
+# switch to this uid/gid through su-exec.
+User=10000:10000
+ReadOnly=true
+Tmpfs=/tmp:size=16m
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
