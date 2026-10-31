@@ -49,19 +49,22 @@ class ShareHandler(BaseHTTPRequestHandler):
         STATE["share"][name] = body
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(f"http://127.0.0.1:{self.server.server_port}/{name}".encode())
+        export = os.environ.get("MOCK_EXPORT_HOST", "127.0.0.1")
+        self.wfile.write(f"http://{export}:{self.server.server_port}/{name}".encode())
 
 
 def main():
-    pager = ThreadingHTTPServer(("127.0.0.1", 0), PagerHandler)
-    share = ThreadingHTTPServer(("127.0.0.1", 0), ShareHandler)
+    bind = os.environ.get("MOCK_BIND", "127.0.0.1")
+    pager = ThreadingHTTPServer((bind, 0), PagerHandler)
+    share = ThreadingHTTPServer((bind, 0), ShareHandler)
     threading.Thread(target=pager.serve_forever, daemon=True).start()
     threading.Thread(target=share.serve_forever, daemon=True).start()
 
     env_file = sys.argv[1]
+    host = os.environ.get("MOCK_EXPORT_HOST", "127.0.0.1")
     with open(env_file, "w") as fh:
-        fh.write(f"PAGER_URL=http://127.0.0.1:{pager.server_port}\n")
-        fh.write(f"SHARE_URL=http://127.0.0.1:{share.server_port}\n")
+        fh.write(f"PAGER_URL=http://{host}:{pager.server_port}\n")
+        fh.write(f"SHARE_URL=http://{host}:{share.server_port}\n")
 
     state_file = sys.argv[2]
     print(json.dumps({"pager_port": pager.server_port, "share_port": share.server_port, "state_file": state_file}))

@@ -1,0 +1,42 @@
+# Docker Swarm stack file — deploy with:
+#   docker stack deploy -c docker-compose.swarm.yml pagersmtp
+# Requires the image to be pushed first: ./build.sh  (ofloo/pagersmtpd:<tag>)
+# and a .env next to this file (same variables as .env.example).
+#
+# MX semantics: published port 25 in host mode, exactly 1 replica pinned to a
+# labelled node, so inbound port 25 lands directly on this container.
+services:
+  pager-smtpd:
+    image: ofloo/pagersmtpd:${TAG:-latest}
+    env_file: .env
+    environment:
+      SMTP_HOST: 0.0.0.0
+      SMTP_PORT: "8025"
+    ports:
+      - target: 8025
+        published: ${SMTP_PUBLISHED_PORT:-25}
+        protocol: tcp
+        mode: host
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          # Pin to the MX node, e.g.: docker node update --label-add pagersmtp=true <node>
+          - node.labels.pagersmtp == true
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+      update_config:
+        order: stop-first
+        parallelism: 1
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket;s=socket.create_connection(('127.0.0.1',8025),2);s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

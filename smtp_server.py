@@ -69,9 +69,8 @@ ALLOW_INSECURE = os.environ.get("PAGER_ALLOW_INSECURE", "") == "1"
 def _require_https(name: str, url: str) -> None:
     if url.lower().startswith("https://"):
         return
-    host = url.lower().split("://", 1)[-1].split("/", 1)[0].split(":")[0]
-    if ALLOW_INSECURE and host in ("127.0.0.1", "localhost", "::1"):
-        LOG.warning("%s is plain HTTP on %s — only allowed with PAGER_ALLOW_INSECURE=1", name, host)
+    if ALLOW_INSECURE:
+        LOG.warning("%s is plain HTTP (%s) — only allowed with PAGER_ALLOW_INSECURE=1", name, url)
         return
     print(f"FATAL: {name} must be HTTPS (got {url!r})", file=sys.stderr)
     sys.exit(2)

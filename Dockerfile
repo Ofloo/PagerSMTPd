@@ -16,5 +16,6 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 8025
 
-USER pager
+# Start as root so entrypoint.sh can switch to PAGER_UID/PAGER_GID (or the
+# built-in 'pager' user) via su-exec. The server itself never runs as root.
 ENTRYPOINT ["/entrypoint.sh"]
