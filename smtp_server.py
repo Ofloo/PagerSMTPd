@@ -24,8 +24,25 @@ import uuid as uuidlib
 from collections import defaultdict, deque
 from email.message import Message
 
+import socket as _socket
+
+from aiosmtpd import controller as _controller_mod
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP as SMTPServer
+
+
+def _safe_get_localhost() -> str:
+    """aiosmtpd probes AF_INET6 unconditionally and crashes where IPv6 is
+    unavailable (FreeBSD jails, minimal containers). Fall back to IPv4."""
+    try:
+        with _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM) as sock:
+            sock.bind(("::1", 0))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+_controller_mod.get_localhost = _safe_get_localhost
 
 LOG = logging.getLogger("pagersmtpd")
 
