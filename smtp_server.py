@@ -190,6 +190,38 @@ def extract_text(msg: Message) -> str:
     return "\n".join(chunks).strip()
 
 
+def header_block(msg: Message) -> str:
+    """RFC822-like header block shown at the top of the pager `logs` field."""
+    lines = []
+    for field in ("From", "To", "Cc", "Subject", "Date", "Message-ID"):
+        value = str(msg.get(field, "") or "").replace("\n", " ").strip()
+        if value:
+            lines.append(f"{field}: {value}")
+    return "\n".join(lines)
+
+
+def sender_address(sender_header: str) -> str:
+    from email.utils import parseaddr
+
+    return parseaddr(sender_header)[1] or sender_header.strip()
+
+
+def notification_title(sender: str, subject: str) -> str:
+    """Title for the page: sender + subject, unless the sender is a mailbox uuid.
+
+    A uuid sender carries no information for the reader, so in that case only
+    the subject is used.
+    """
+    address = sender_address(sender)
+    local = address.rpartition("@")[0]
+    subject = (subject or "").strip()
+    if UUID_RE.match(local or ""):
+        return subject or f"Mail from {address}"
+    if subject:
+        return f"{address or sender} — {subject}"
+    return f"Mail from {address or sender}"
+
+
 def extract_attachments(msg: Message) -> list[tuple[str, bytes]]:
     out: list[tuple[str, bytes]] = []
     for part in msg.walk():
@@ -299,9 +331,14 @@ class PagerHandler:
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
         body_text = extract_text(msg)
-        logs = body_text[:4000]
+        # Header block first, then the body: the pager UI only shows `logs`,
+        # so From/To/Date/Message-ID must be visible there.
+        headers = header_block(msg)
+        logs = (headers + "\n\n" + body_text).strip() if headers else body_text
+        logs = logs[:4000]
         if log_notes:
             logs = (logs + "\n" + "\n".join(log_notes)).strip()
+        title = notification_title(sender, subject)
 
         recipients = sorted({addr.rpartition("@")[0].lower() for addr in envelope.rcpt_tos})
         permanent = False
@@ -311,7 +348,7 @@ class PagerHandler:
                 "PROJECT": PROJECT,
                 "JOB_ID": message_id,
                 "status": "received",
-                "message": f"Mail from {sender} — {subject}".strip(" —"),
+                "message": title,
                 "logs": logs,
                 "attachments": attachment_urls,
                 "source": "smtp",

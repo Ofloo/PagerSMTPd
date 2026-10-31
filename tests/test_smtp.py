@@ -117,8 +117,24 @@ if notes:
     p = notes[0]["payload"]
     check("payload has PROJECT/JOB_ID/status/message/logs",
           all(k in p for k in ("PROJECT", "JOB_ID", "status", "message", "logs")), json.dumps(p)[:200])
-    check("message contains subject", "hello" in p["message"])
+    check("message contains sender and subject", "sender@example.org" in p["message"] and "hello" in p["message"])
     check("logs contain body", "test body" in p["logs"])
+    check("logs start with a header block", p["logs"].startswith("From: sender@example.org"), p["logs"][:80])
+
+# 1b. uuid sender -> title is just the subject (no uuid noise in the page)
+m = EmailMessage()
+m["From"] = f"{uuid.uuid4()}@pager.ofloo.io"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "uuid-sender-subject"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m.set_content("uuid sender body")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+check("uuid sender accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["payload"]["message"] == "uuid-sender-subject"]
+check("uuid sender: title is only the subject", len(notes) == 1,
+      str([n["payload"]["message"] for n in st["notify"]])[-150:])
 
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
