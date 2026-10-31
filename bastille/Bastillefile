@@ -5,13 +5,19 @@
 #   bastille create pagersmtp            # auto loopback alias, e.g. 127.0.0.2
 #   bastille template pagersmtp ./bastille
 #   bastille cmd pagersmtp cp /usr/local/etc/pagersmtpd.env.default /usr/local/etc/pagersmtpd.env
-#   # edit /usr/local/etc/pagersmtpd.env on the jail, then:
+#   # edit /usr/local/etc/pagersmtpd.env in the jail, then:
 #   bastille cmd pagersmtp service pagersmtpd restart
 #
-# See bastille/README.md for the pf redirect (host port 25 -> jail:8025) and outbound NAT.
+# Everything comes from pkg; aiosmtpd falls back to pip (installed with pkg)
+# only when no matching pyXY-aiosmtpd flavor exists on this FreeBSD release.
+# See bastille/README.md for the pf redirect (host port 25 -> jail:8025) and NAT.
 
-# Python + aiosmtpd. On newer FreeBSD (default python 3.12+) use py312-aiosmtpd instead.
-PKG python3 py311-aiosmtpd
+PKG python3
+PKG curl
+
+# aiosmtpd via pkg (try the common python flavors), otherwise pip from pkg's pip.
+CMD sh -c 'pkg install -y py311-aiosmtpd || pkg install -y py312-aiosmtpd || pkg install -y py313-aiosmtpd || true'
+CMD sh -c 'python3 -c "import aiosmtpd" 2>/dev/null || { pkg install -y py311-pip || pkg install -y py312-pip || pkg install -y py313-pip || true; python3 -m pip install --no-cache-dir aiosmtpd==1.4.6; }'
 
 CMD mkdir -p /usr/local/lib/pagersmtpd /usr/local/etc /var/run/pagersmtpd
 
@@ -19,10 +25,10 @@ CMD mkdir -p /usr/local/lib/pagersmtpd /usr/local/etc /var/run/pagersmtpd
 CP ../smtp_server.py /usr/local/lib/pagersmtpd/smtp_server.py
 
 # rc script + default env
-CP bastille/root/ /
+CP root/ /
 
 SYSRC pagersmtpd_enable=YES
 
 # Start immediately if an env file already exists (otherwise it fails fast on
 # missing PAGER_DOMAIN, which is intentional — configure first, then restart).
-CMD sh -c 'if [ -r /usr/local/etc/pagersmtpd.env ]; then service pagersmtpd start; fi'
+CMD sh -c 'if [ -r /usr/local/etc/pagersmtpd.env ]; then service pagersmtpd start; fi || true'
