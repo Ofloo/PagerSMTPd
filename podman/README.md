@@ -1,4 +1,8 @@
-# PagerSMPTd on Podman
+# PagerSMPTd on Podman (Linux only)
+
+Podman is a Linux container engine (on macOS/Windows it runs a Linux VM); it
+does **not** run natively on FreeBSD. Use the Bastille jail template
+(`bastille/`) or the FreeBSD port (`ports/mail/pagersmtpd`) there.
 
 The Docker image is a plain OCI image and runs unchanged under Podman (no
 changes to the code, no separate build).

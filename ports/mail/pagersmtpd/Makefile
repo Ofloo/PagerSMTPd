@@ -2,7 +2,6 @@ PORTNAME=	pagersmtpd
 DISTVERSION=	0.7.0
 CATEGORIES=	mail
 MASTER_SITES=	GH
-PKGNAMESUFFIX=	# keep the name short: pagersmtpd
 
 MAINTAINER=	ofloo@ofloo.io
 COMMENT=	Receive-only SMTP catch-all that forwards mail to PagerMCP
