@@ -36,6 +36,20 @@ salt --batch 2 -C 'G@roles:swarm' state.apply pagersmtpd-prune
 `deploy/salt/pagersmtpd-prune.sls` moet dan in de Salt file_roots staan
 (bv. `/srv/salt/pagersmtpd-prune.sls`).
 
+## 4b. Volumes (NFS-backed: veilig)
+Op deze Swarm zijn volumes NFS-backed. `docker volume prune -f` verwijdert dan
+alleen de ongebruikte volume-definities; de bestanden blijven op de NFS-server
+staan. Op nodes met lokale (non-NFS) volumes met data: niet doen.
+```sh
+salt --batch 2 -C 'G@roles:swarm' cmd.run 'docker volume prune -f'
+```
+Of in één keer, zoals je gewend bent:
+```sh
+salt --batch 2 -C 'G@roles:swarm' cmd.run 'docker system prune -a --volumes -f'
+```
+(let op: dat ruimt ook images van andere stacks op die nodes op — die pullen
+vanzelf weer bij de volgende deploy/reschedule).
+
 ## 5. Image opnieuw pullen na prune
 ```sh
 salt -C 'G@roles:manager' cmd.run \
@@ -49,6 +63,7 @@ salt -C 'G@roles:manager' cmd.run 'docker service ps pagersmtp_pager-smtpd --no-
 ```
 
 ## Waarschuwing
-`docker system prune -a --volumes -f` verwijdert **alle** ongebruikte images én
-volumes op elke getargete node — onomkeerbaar en meestal niet nodig. Gebruik
-`docker image prune` of `docker volume prune` gericht.
+`docker system prune -a --volumes -f` verwijdert alle ongebruikte images én
+volumes op elke getargete node. Met NFS-backed volumes is het dataverlies nihil
+(de NFS-data blijft), maar images van andere stacks worden ook opgeruimd en
+moeten opnieuw gepulld worden. Op nodes met lokale volumes: `--volumes` weglaten.
