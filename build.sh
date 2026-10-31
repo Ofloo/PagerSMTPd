@@ -49,33 +49,9 @@ fi
 echo "🔄 Setting up QEMU"
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-# --- pager notification helpers ---------------------------------------------
-notify_pager() {
-    # $1 = status (running|succeeded|failed), $2 = message, $3 = logs
-    # pager.sh --notify heeft geen logs-veld; logs gaan in de message (afgetopt).
-    [ -x ./pager.sh ] || return 0
-    local msg="$2"
-    [ -n "$3" ] && msg="$msg
---- logs (tail) ---
-$(printf '%s' "$3" | tail -n 20)"
-    local dry=""
-    [ "${PAGER_DRY_RUN:-0}" = "1" ] && dry="--dry-run"
-    ./pager.sh --notify $dry \
-        --session .pager_session \
-        --project PagerSMPTd \
-        --job-id "${IMAGE_NAME}:${TAG}-build${BUILD_NUMBER}" \
-        --success-status "$1" --fail-status "$1" \
-        --message "$msg" 2>/dev/null || true
-}
-
-notify_pager running "build started: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER} platforms=${PLATFORMS}" ""
-trap 'notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 30 .build_last.log 2>/dev/null || true)"' ERR
-trap 'notify_pager failed "build interrupted: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" ""' INT TERM
-
-# Build and push; capture output for logs.
-# Every build pushes BOTH the requested tag AND the version tag v<VERSION>,
-# so a release always has a pinned image (e.g. ofloo/pagersmtpd:v0.1.0).
-# A Hailo (arm64-only) build must NOT overwrite the multiarch version tag.
+# --- build + pager notification: one pager.sh --run around the build --------
+# pager.sh reports status (success/failed), the real exit code and the log tail
+# in a single page; there is no separate "running" page for long builds.
 V="v$(tr -d ' \n' < VERSION 2>/dev/null || true)"
 [[ "$V" == "v" ]] && V="v${TAG}"
 if [[ "$HAILO_BUILD" == "1" ]]; then
@@ -88,26 +64,39 @@ fi
 echo "🏷️  Image tags: ${IMAGE_NAME}:${TAG} ${IMAGE_NAME}:${V}"
 
 BUILD_LOG=".build_last.log"
+BUILD_CMD="docker buildx build --platform '$PLATFORMS' ${TAGS[*]} $BUILD_ARGS --push ."
+JOB_ID="${IMAGE_NAME}:${TAG}-build${BUILD_NUMBER}"
+PAGER=""
+[[ -x ./pager.sh && -f .pager_session ]] && PAGER=./pager.sh
+
 echo "🚀 Starting build..."
-if docker buildx build \
-    --platform "$PLATFORMS" \
-    "${TAGS[@]}" \
-    $BUILD_ARGS \
-    --push \
-    . 2>&1 | tee "$BUILD_LOG"; then
-    BUILD_OK=1
+if [[ -n "$PAGER" ]]; then
+    if "$PAGER" --run "$BUILD_CMD" \
+        --session .pager_session \
+        --project PagerSMPTd \
+        --job-id "$JOB_ID" \
+        --log "$BUILD_LOG" --tail 30 \
+        --message "build ${IMAGE_NAME}:${TAG} + ${V} build#${BUILD_NUMBER} (${PLATFORMS})"; then
+        BUILD_OK=1
+    else
+        BUILD_OK=0
+        echo "--- build log (tail) ---"
+        tail -n 40 "$BUILD_LOG" 2>/dev/null || true
+    fi
 else
-    BUILD_OK=0
+    if bash -c "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG"; then
+        BUILD_OK=1
+    else
+        BUILD_OK=0
+    fi
 fi
 
 if [[ "$BUILD_OK" != "1" ]]; then
     echo "❌ Build failed — no release commit, no tag."
-    notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 50 "$BUILD_LOG" 2>/dev/null || true)"
     rm -f "$BUILD_LOG"
     exit 1
 fi
 rm -f "$BUILD_LOG"
-trap - ERR INT TERM
 
 echo "✅ Successfully built and pushed ${IMAGE_NAME}:${TAG} + ${IMAGE_NAME}:${V} for ${PLATFORMS}"
 
@@ -125,4 +114,4 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-notify_pager succeeded "build OK: ${IMAGE_NAME}:${TAG}+${V} build#${BUILD_NUMBER} commit=${SHA} platforms=${PLATFORMS}" "images pushed: ${IMAGE_NAME}:${TAG}, ${IMAGE_NAME}:${V}"
+echo "📦 pushed ${IMAGE_NAME}:${TAG} + ${IMAGE_NAME}:${V} (commit ${SHA})"
