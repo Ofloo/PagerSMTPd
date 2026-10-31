@@ -1,7 +1,7 @@
 # TODO
 
 ## Later
-- [ ] Bastille-template testen op een echte FreeBSD-host (template staat in `bastille/`, nog niet live getest).
+- [x] Bastille-template getest op FreeBSD 15.1 (Bastille 1.4.4), jail `pagersmtp` op 10.13.40.202.
 - [ ] STARTTLS op SMTP (cert via env of reverse proxy op 465/587).
 - [ ] Eventueel DKIM/SPF/DMARC-controle op inkomende mail (nu alleen RCPT-uuid check).
 - [ ] Metrics/health endpoint (nu alleen logs naar stdout).
