@@ -30,6 +30,8 @@ export RATE_LIMIT_MESSAGES=100
 export RATE_LIMIT_WINDOW_SECONDS=60
 export LOG_LEVEL=DEBUG
 export PAGER_ALLOW_INSECURE=1
+# Trusted senders for X-Pager-* urgency tests (sender@example.org in the tests)
+export PAGER_TRUSTED_SENDERS="example.org,@trusted.test,ops@example.net"
 
 python3 smtp_server.py >"$WORK/smtp.log" 2>&1 &
 SMTP_PID=$!

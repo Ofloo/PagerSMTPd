@@ -23,6 +23,7 @@ import urllib.request
 import uuid as uuidlib
 from collections import defaultdict, deque
 from email.message import Message
+from email.utils import parseaddr
 
 import socket as _socket
 
@@ -105,6 +106,13 @@ RATE_LIMIT_MESSAGES = env_int("RATE_LIMIT_MESSAGES", 20)
 RATE_LIMIT_WINDOW_SECONDS = env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 PROJECT = os.environ.get("PAGER_PROJECT", "smtp")
+# Comma-separated email addresses and/or domains allowed to raise urgency via
+# X-Pager-* controls. Empty = nobody is trusted (urgency is clamped to warning).
+TRUSTED_SENDERS = tuple(
+    entry.strip().lower()
+    for entry in os.environ.get("PAGER_TRUSTED_SENDERS", "").split(",")
+    if entry.strip()
+)
 
 if not PAGER_DOMAIN:
     print("FATAL: PAGER_DOMAIN environment variable is required", file=sys.stderr)
@@ -351,6 +359,122 @@ def html_to_text(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+CONTROL_RE = re.compile(r"^\s*X-Pager-([A-Za-z0-9-]+)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+CONTROL_KEYS = ("status", "prio", "project", "job-id", "silent", "tags")
+STATUS_WORDS = {
+    "success": 0, "ok": 0, "succeeded": 0, "done": 0, "completed": 0,
+    "warning": 1, "warn": 1,
+    "failed": 2, "failure": 2, "fail": 2, "error": 2,
+    "critical": 3, "fatal": 3, "urgent": 3,
+    "running": 4, "started": 4, "in progress": 4, "in_progress": 4,
+    "queued": 5, "pending": 5,
+}
+PRIOS = ("debug", "info", "warning", "alarm", "critical")
+
+
+def split_body_controls(text: str) -> tuple[dict[str, str], str]:
+    """Pop a leading block of `X-Pager-*: value` lines off a mail body.
+
+    The block may only be the very first lines of the body and ends at the
+    first line that is not such a control (or after 25 lines). Body controls
+    override mail headers of the same name.
+    """
+    controls: dict[str, str] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines) and index < 25:
+        match = CONTROL_RE.match(lines[index])
+        if not match:
+            break
+        controls[match.group(1).lower()] = match.group(2)
+        index += 1
+    if not controls:
+        return {}, text
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    return controls, "\n".join(lines[index:])
+
+
+def sender_trusted(sender_header: str) -> bool:
+    if not TRUSTED_SENDERS:
+        return False
+    address = (parseaddr(sender_header)[1] or "").strip().lower()
+    if not address:
+        return False
+    domain = address.rpartition("@")[2]
+    for entry in TRUSTED_SENDERS:
+        if entry.startswith("@"):
+            if domain == entry[1:]:
+                return True
+        elif "@" in entry:
+            if address == entry:
+                return True
+        elif domain == entry:
+            return True
+    return False
+
+
+def parse_status_value(raw: str) -> int | None:
+    value = raw.strip().lower()
+    if value.isdigit():
+        number = int(value)
+        return number if 0 <= number <= 9 else None
+    return STATUS_WORDS.get(value)
+
+
+def resolve_controls(
+    controls: dict[str, str], sender_header: str, default_project: str,
+    default_job_id: str,
+) -> tuple[dict, list[str]]:
+    """Validate X-Pager-* controls; clamp urgency for untrusted senders."""
+    notes: list[str] = []
+    trusted = sender_trusted(sender_header)
+    status = 1
+    prio: str | None = None
+
+    raw_status = controls.get("status")
+    if raw_status is not None:
+        parsed = parse_status_value(raw_status)
+        if parsed is None:
+            notes.append(f"X-Pager-Status ignored: {raw_status!r}")
+        elif not trusted and parsed > 1:
+            notes.append("X-Pager-Status clamped to warning (sender not trusted)")
+        else:
+            status = parsed
+
+    raw_prio = (controls.get("prio") or "").strip().lower()
+    if raw_prio:
+        if raw_prio not in PRIOS:
+            notes.append(f"X-Pager-Prio ignored: {raw_prio!r}")
+        elif not trusted and raw_prio in ("alarm", "critical"):
+            notes.append("X-Pager-Prio clamped to warning (sender not trusted)")
+            prio = "warning"
+        else:
+            prio = raw_prio
+
+    if (controls.get("silent") or "").strip().lower() in ("1", "true", "yes", "on"):
+        if prio is None:
+            prio = "info"  # PagerAPP: status 0 (info) is silent by default
+        notes.append("X-Pager-Silent: notification suppressed (prio info)")
+
+    project = (controls.get("project") or "").strip()[:64] or default_project
+    job_id = (controls.get("job-id") or "").strip()[:200] or default_job_id
+    tags = [
+        tag.strip()[:32]
+        for tag in (controls.get("tags") or "").split(",")
+        if tag.strip()
+    ][:10]
+
+    resolved = {
+        "status": status,
+        "prio": prio,
+        "PROJECT": project,
+        "JOB_ID": job_id,
+        "tags": tags,
+    }
+    return resolved, notes
+
+
 def extract_attachments(msg: Message) -> list[tuple[str, bytes]]:
     """Real file attachments only: forwarded mails (message/rfc822) are body."""
     out: list[tuple[str, bytes]] = []
@@ -459,12 +583,26 @@ class PagerHandler:
         subject = str(msg.get("Subject", ""))
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
-        body_text = clean_text(extract_text(msg))
-        # RFC-PagerAPP-0003 (docs/rfc-gateway.md): message is the readable
-        # title (normally the subject), logs is the plain-text body.
-        body_text = body_text[:8000]
-        if log_notes:
-            body_text = (body_text + "\n" + "\n".join(log_notes)).strip()
+
+        # Optional per-mail controls: X-Pager-* mail headers, overridden by an
+        # X-Pager-* block at the top of the body (docs/rfc-0001-mail-mapping.md).
+        raw_body = extract_text(msg)
+        body_controls, raw_body = split_body_controls(raw_body)
+        header_controls = {
+            key: str(msg.get(f"X-Pager-{key}")).strip()
+            for key in CONTROL_KEYS
+            if msg.get(f"X-Pager-{key}") is not None
+        }
+        resolved, control_notes = resolve_controls(
+            {**header_controls, **body_controls}, sender, PROJECT, message_id
+        )
+
+        # RFC-PagerAPP-0003: message is the readable title (normally the
+        # subject), logs is the plain-text body.
+        body_text = clean_text(raw_body)[:8000]
+        notes = control_notes + log_notes
+        if notes:
+            body_text = (body_text + "\n" + "\n".join(notes)).strip()
         subject_text = (subject or "").strip()
         message = subject_text or body_text.strip()[:120] or "(no subject)"
 
@@ -473,9 +611,9 @@ class PagerHandler:
         temporary = False
         for local in recipients:
             payload = {
-                "status": 1,  # warning: a new mail that needs attention
-                "PROJECT": PROJECT,
-                "JOB_ID": message_id,
+                "status": resolved["status"],
+                "PROJECT": resolved["PROJECT"],
+                "JOB_ID": resolved["JOB_ID"],
                 "message": message,
                 "logs": body_text,
                 "attachments": attachment_urls,
@@ -483,6 +621,10 @@ class PagerHandler:
                 "smtpd_version": VERSION_STRING,
                 "rcpt": f"{local}@{PAGER_DOMAIN}",
             }
+            if resolved["prio"]:
+                payload["prio"] = resolved["prio"]
+            if resolved["tags"]:
+                payload["tags"] = resolved["tags"]
             try:
                 status, resp = notify_pager(local, payload)
             except Exception as exc:

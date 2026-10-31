@@ -294,6 +294,69 @@ notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "Body zonder 
 check("empty subject falls back to body excerpt", len(notes) == 1,
       str([n["payload"]["message"] for n in st["notify"]])[-150:])
 
+# 1k. X-Pager-* controls from a body block (trusted sender: example.org)
+m = EmailMessage()
+m["From"] = "sender@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "controls-body"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m.set_content(
+    "X-Pager-Prio: critical\n"
+    "X-Pager-Project: CI\n"
+    "X-Pager-Job-Id: deploy-42\n"
+    "X-Pager-Tags: deploy,prod\n"
+    "\n"
+    "Body met controls."
+)
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+check("body controls mail accepted", code == 250, f"{code} {msg}")
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "controls-body" in n["payload"]["message"]]
+check("body controls page received", len(notes) == 1)
+if notes:
+    p = notes[0]["payload"]
+    check("body X-Pager-Prio applied (trusted)", p.get("prio") == "critical", str(p.get("prio")))
+    check("body X-Pager-Project applied", p.get("PROJECT") == "CI", str(p.get("PROJECT")))
+    check("body X-Pager-Job-Id applied", p.get("JOB_ID") == "deploy-42", str(p.get("JOB_ID")))
+    check("body X-Pager-Tags applied", p.get("tags") == ["deploy", "prod"], str(p.get("tags")))
+    check("control block removed from logs", "X-Pager" not in p.get("logs", ""), p.get("logs", "")[:120])
+
+# 1l. X-Pager-* as mail headers work too
+m = EmailMessage()
+m["From"] = "sender@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "controls-header"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m["X-Pager-Status"] = "failed"
+m["X-Pager-Job-Id"] = "job-from-header"
+m.set_content("Body via header controls.")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "controls-header" in n["payload"]["message"]]
+check("header controls applied", bool(notes) and notes[0]["payload"].get("status") == 2
+      and notes[0]["payload"].get("JOB_ID") == "job-from-header",
+      str(notes[0]["payload"].get("status")) if notes else "missing")
+
+# 1m. untrusted sender cannot raise urgency
+m = EmailMessage()
+m["From"] = "attacker@evil.example"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "controls-untrusted"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@evil.example>"
+m["X-Pager-Prio"] = "critical"
+m.set_content("X-Pager-Status: 3\n\nProbeer alarm te slaan.")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "controls-untrusted" in n["payload"]["message"]]
+check("untrusted urgency is clamped", bool(notes)
+      and notes[0]["payload"].get("prio") == "warning" and notes[0]["payload"].get("status") == 1,
+      str({k: notes[0]["payload"].get(k) for k in ("prio", "status")}) if notes else "missing")
+if notes:
+    check("clamp is explained in the page", "not trusted" in notes[0]["payload"]["logs"])
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")

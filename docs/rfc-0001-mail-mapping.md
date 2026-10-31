@@ -8,10 +8,10 @@ Status: draft · Versie: 0.7.0 · Gerelateerd: PagerAPP `docs/rfc-gateway.md` (R
 bepaald formaat nodig: onderwerp, tekst en bijlagen worden automatisch omgezet
 naar een PagerAPP-page volgens RFC-PagerAPP-0003.
 
-Optionele sturing (urgentie, project, job-id) kan later via `X-Pager-*`-headers.
-Die zijn **niet geïmplementeerd** in 0.7.0 en staan in §6 als voorstel, met een
-belangrijke veiligheidskanttekening: headers zijn door de afzender bepaald en op
-een publieke MX dus door iedereen te zetten.
+Optionele sturing (urgentie, project, job-id) kan via `X-Pager-*`, als
+mailheader **of** als blok bovenaan de body (geïmplementeerd sinds 0.8.0). Op een
+publieke MX is die sturing door de afzender bepaald, dus urgentie wordt alleen
+verhoogd voor afzenders in `PAGER_TRUSTED_SENDERS`; zie §6.
 
 ## 2. Automatische mapping (geïmplementeerd)
 
@@ -80,40 +80,51 @@ SMTP-bridge niet ondersteund:
 
 Een mail is dus altijd een "one-way page": lezen, niet antwoorden.
 
-## 6. Voorstel: optionele sturing per mail (`X-Pager-*`)
+## 6. Optionele sturing per mail (`X-Pager-*`) — geïmplementeerd
 
-Niet geïmplementeerd. Bedoeld voor afzenders die méér willen dan de defaults.
+Twee manieren, met dezelfde sleutels:
 
-| Header | Voorbeeld | Effect |
+1. **Mailheader** — `X-Pager-Prio: critical`
+2. **Body-blok** — de eerste regels van de body:
+
+```
+X-Pager-Prio: critical
+X-Pager-Project: CI
+X-Pager-Job-Id: deploy-42
+X-Pager-Tags: deploy,prod
+
+Vanaf hier is het de gewone berichttekst.
+```
+
+Het body-blok eindigt bij de eerste regel die geen `X-Pager-*` is (max 25
+regels) en wordt uit de body verwijderd. **Body wint van headers** (handig: het
+overleeft doorsturen en clients die custom headers strippen).
+
+| Sleutel | Waarden | Effect |
 |---|---|---|
-| `X-Pager-Status` | `1` \| `warning` \| `2` \| `failed` \| `3` \| `critical` | urgency/status van de page |
-| `X-Pager-Prio` | `info` \| `warning` \| `alarm` \| `critical` | wint van `status` (RFC-PagerAPP-0002) |
-| `X-Pager-Project` | `CI`, `ProLOG` | overschrijft `PROJECT` |
-| `X-Pager-Job-Id` | `deploy-1234` | overschrijft `JOB_ID` (anders Message-ID) |
-| `X-Pager-Silent` | `1` | geen notificatie (page blijft in de lijst) |
-| `X-Pager-Tags` | `deploy,prod` | extra veld `tags[]` (clients negeren het) |
+| `X-Pager-Status` | `0`-`5` of `success`/`warning`/`failed`/`critical`/`running`/`queued` | status van de page |
+| `X-Pager-Prio` | `debug` \| `info` \| `warning` \| `alarm` \| `critical` | wint van `status` |
+| `X-Pager-Project` | tekst (max 64) | overschrijft `PROJECT` |
+| `X-Pager-Job-Id` | tekst (max 200) | overschrijft `JOB_ID` |
+| `X-Pager-Silent` | `1`/`true`/`yes`/`on` | geen notificatie (`prio: info`) |
+| `X-Pager-Tags` | kommagescheiden (max 10, elk 32) | extra veld `tags[]` |
 
-Volgorde: header > default. Onbekende waarden → negeren (default gebruiken).
+Onbekende sleutels/waarden worden genegeerd en als notitie in `logs` gezet.
 
-### Veiligheid (belangrijk)
+### Veiligheid
 
-Een MX accepteert mail van iedereen; headers zijn dus **niet vertrouwd**. Zonder
-maatregelen kan een willekeurige afzender `X-Pager-Prio: critical` zetten en
-'s nachts een alarm afdwingen.
+Een MX accepteert mail van iedereen; `X-Pager-*` is dus **niet vertrouwd**.
 
-Voorstel:
+- `PAGER_TRUSTED_SENDERS` = kommagescheiden lijst van e-mailadressen en/of
+  domeinen (bv. `ops@example.net,@example.org,example.com`). Leeg = niemand.
+- **Vertrouwd**: alle waarden worden toegepast.
+- **Niet vertrouwd**: `status` mag alleen verlaagd worden (max `1`/warning) en
+  `prio` wordt geclamped naar `warning`; `critical`/`alarm` worden geweigerd.
+  `project`, `job-id`, `tags` en `silent` zijn onschuldig en blijven werken.
+- Elke clamp/afwijzing staat als notitie in de page-body (`logs`), zodat de
+  ontvanger ziet wat er genegeerd is.
 
-1. **Standaard**: `X-Pager-*` alleen toepassen als de afzender in een
-   allowlist staat (`PAGER_TRUSTED_SENDERS`, bv. e-mailadressen/domeinen of
-   CIDR's), of als de mail via een vertrouwde relay binnenkomt.
-2. **Zonder allowlist**: alleen "verlagende" waarden toestaan (bv. `info`),
-   nooit verhogen boven `warning`. `critical`/`alarm` alleen vertrouwd.
-3. `X-Pager-Silent` en `X-Pager-Tags` zijn onschuldig en kunnen altijd.
-4. Alles loggen wat een header heeft overschreven (audit trail).
-
-Alternatief zonder headers: een onderwerpprefix (`[CRITICAL] …`) — minder
-betrouwbaar (wordt door clients/forwarding aangepast) en even goed
-afzender-bepaald, dus dezelfde allowlist nodig.
+Zonder allowlist kan een willekeurige afzender dus geen alarm afdwingen.
 
 ## 7. Grenzen
 
@@ -129,4 +140,4 @@ afzender-bepaald, dus dezelfde allowlist nodig.
 | Automatische mapping (§2) | geïmplementeerd sinds 0.6.x, RFC-conform sinds 0.6.12 |
 | Body-extractie + opschonen (§3) | geïmplementeerd |
 | Bijlagen (§4) | geïmplementeerd |
-| `X-Pager-*` (§6) | voorstel |
+| `X-Pager-*` (§6), header + body-blok, allowlist | geïmplementeerd sinds 0.8.0 |
