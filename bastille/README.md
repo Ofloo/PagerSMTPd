@@ -26,6 +26,14 @@ nat on $ext_if inet from <jail-ip> to any -> ($ext_if)   # outbound HTTPS naar p
 ```
 `pfctl -f /etc/pf.conf`
 
+De pf-tabel `<jails>` moet het jail-IP bevatten (anders geen uitgaand HTTPS).
+Maak dat persistent, bv. in `/etc/rc.local`:
+```sh
+pfctl -t jails -T add 10.13.40.202   # <jail-ip>
+```
+(en `sysrc gateway_enable=YES` voor NAT). Het jail-IP is te vinden met
+`bastille list all`.
+
 ## Non-root
 De rc-service draait als user `pager` (uid/gid 10000). Aanpassen:
 ```sh

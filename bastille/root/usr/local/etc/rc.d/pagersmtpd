@@ -8,6 +8,8 @@
 
 name="pagersmtpd"
 rcvar="pagersmtpd_enable"
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/bin/python3"
 
 : "${pagersmtpd_enable:=NO}"
 : "${pagersmtpd_envfile:=/usr/local/etc/pagersmtpd.env}"
@@ -40,11 +42,12 @@ stop_cmd="pagersmtpd_stop"
 
 pagersmtpd_start() {
     pagersmtpd_precmd || return 1
-    # Drop a stale pidfile left by a crashed/killed instance.
-    pidfile="/var/run/${name}.pid"
-    if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        rm -f "$pidfile"
+    # Already running: report success so automation (Bastille, Ansible) is happy.
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "${name} already running (pid $(cat "$pidfile"))."
+        return 0
     fi
+    rm -f "$pidfile"
     echo "Starting ${name} as ${pagersmtpd_user}."
     /usr/sbin/daemon -u "${pagersmtpd_user}" -p "/var/run/${name}.pid" \
         /usr/local/bin/python3 /usr/local/lib/pagersmtpd/smtp_server.py
