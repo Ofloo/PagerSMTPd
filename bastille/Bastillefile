@@ -1,0 +1,28 @@
+# PagerSMPTd — FreeBSD Bastille template
+# Receive-only SMTP catch-all -> PagerMCP + share.h4ck.io (same as the Docker image).
+#
+# Apply from the REPO ROOT (the template references ../smtp_server.py):
+#   bastille create pagersmtp            # auto loopback alias, e.g. 127.0.0.2
+#   bastille template pagersmtp ./bastille
+#   bastille cmd pagersmtp cp /usr/local/etc/pagersmtpd.env.default /usr/local/etc/pagersmtpd.env
+#   # edit /usr/local/etc/pagersmtpd.env on the jail, then:
+#   bastille cmd pagersmtp service pagersmtpd restart
+#
+# See bastille/README.md for the pf redirect (host port 25 -> jail:8025) and outbound NAT.
+
+# Python + aiosmtpd. On newer FreeBSD (default python 3.12+) use py312-aiosmtpd instead.
+PKG python3 py311-aiosmtpd
+
+CMD mkdir -p /usr/local/lib/pagersmtpd /usr/local/etc /var/run/pagersmtpd
+
+# Shared server code from the repo root (identical logic to the Docker image)
+CP ../smtp_server.py /usr/local/lib/pagersmtpd/smtp_server.py
+
+# rc script + default env
+CP bastille/root/ /
+
+SYSRC pagersmtpd_enable=YES
+
+# Start immediately if an env file already exists (otherwise it fails fast on
+# missing PAGER_DOMAIN, which is intentional — configure first, then restart).
+CMD sh -c 'if [ -r /usr/local/etc/pagersmtpd.env ]; then service pagersmtpd start; fi'
