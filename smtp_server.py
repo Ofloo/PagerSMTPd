@@ -45,6 +45,32 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def read_version() -> str:
+    """Version from APP_VERSION, then the VERSION file shipped next to us."""
+    candidates = [
+        os.environ.get("APP_VERSION", "").strip(),
+        "/app/VERSION",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as fh:
+                value = fh.read().strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    return "unknown"
+
+
+VERSION = read_version()
+BUILD_NUMBER = os.environ.get("BUILD_NUMBER", "").strip()
+VERSION_STRING = f"{VERSION} build {BUILD_NUMBER}" if BUILD_NUMBER else VERSION
+IDENT = f"PagerSMPTd {VERSION_STRING}"
+
 PAGER_DOMAIN = os.environ.get("PAGER_DOMAIN", "").strip().lower()
 PAGER_URL = os.environ.get("PAGER_URL", "https://pager.ofloo.io").strip().rstrip("/")
 SHARE_URL = os.environ.get("SHARE_URL", "https://share.h4ck.io").strip().rstrip("/")
@@ -349,6 +375,7 @@ class PagerHandler:
                 "logs": logs,
                 "attachments": attachment_urls,
                 "source": "smtp",
+                "smtpd_version": VERSION_STRING,
                 "rcpt": f"{local}@{PAGER_DOMAIN}",
             }
             try:
@@ -383,10 +410,12 @@ class PagerController(Controller):
             self.handler,
             data_size_limit=MAX_TOTAL_BYTES,
             decode_data=False,
+            ident=IDENT,
         )
 
 
 def main() -> None:
+    LOG.info("PagerSMPTd %s", VERSION_STRING)
     LOG.info(
         "starting receive-only SMTP on %s:%d domain=%s pager=%s share=%s "
         "max_total=%d max_msg=%d max_att=%d max_attachments=%d rate=%d/%ds",

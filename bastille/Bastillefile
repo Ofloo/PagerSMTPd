@@ -23,6 +23,7 @@ CMD mkdir -p /usr/local/lib/pagersmtpd /usr/local/etc /var/run/pagersmtpd
 
 # Shared server code from the repo root (identical logic to the Docker image)
 CP ../smtp_server.py /usr/local/lib/pagersmtpd/smtp_server.py
+CP ../VERSION /usr/local/lib/pagersmtpd/VERSION
 
 # rc script + default env
 CP root/ /

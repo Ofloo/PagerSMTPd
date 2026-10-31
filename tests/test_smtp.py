@@ -143,6 +143,14 @@ time.sleep(0.4)
 st = state()
 check("other uuid got its own page", any(n["mailbox"] == other for n in st["notify"]))
 
+# 1d. version is visible in the SMTP greeting (banner)
+with socket.create_connection((HOST, PORT), timeout=5) as sock:
+    banner = sock.recv(512).decode("utf-8", "replace")
+check("SMTP banner shows PagerSMPTd version", "PagerSMPTd" in banner, banner.strip())
+time.sleep(0.3)
+st = state()
+check("payload carries smtpd_version", any(n["payload"].get("smtpd_version") for n in st["notify"]))
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")
