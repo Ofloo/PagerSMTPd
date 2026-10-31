@@ -44,24 +44,67 @@ fi
 echo "🔄 Setting up QEMU"
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-# Build and push
+# --- pager notification helpers ---------------------------------------------
+notify_pager() {
+    # $1 = status (running|succeeded|failed), $2 = message, $3 = logs
+    # pager.sh --notify heeft geen logs-veld; logs gaan in de message (afgetopt).
+    [ -x ./pager.sh ] || return 0
+    local msg="$2"
+    [ -n "$3" ] && msg="$msg
+--- logs (tail) ---
+$(printf '%s' "$3" | tail -n 20)"
+    local dry=""
+    [ "${PAGER_DRY_RUN:-0}" = "1" ] && dry="--dry-run"
+    ./pager.sh --notify $dry \
+        --session .pager_session \
+        --project PagerSMPTd \
+        --job-id "${IMAGE_NAME}:${TAG}-build${BUILD_NUMBER}" \
+        --success-status "$1" --fail-status "$1" \
+        --message "$msg" 2>/dev/null || true
+}
+
+notify_pager running "build started: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER} platforms=${PLATFORMS}" ""
+trap 'notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 30 .build_last.log 2>/dev/null || true)"' ERR
+trap 'notify_pager failed "build interrupted: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" ""' INT TERM
+
+# Build and push; capture output for logs
+BUILD_LOG=".build_last.log"
 echo "🚀 Starting build..."
-docker buildx build \
+if docker buildx build \
     --platform "$PLATFORMS" \
     -t "${IMAGE_NAME}:${TAG}" \
     $BUILD_ARGS \
     --push \
-    .
+    . 2>&1 | tee "$BUILD_LOG"; then
+    BUILD_OK=1
+else
+    BUILD_OK=0
+fi
+rm -f "$BUILD_LOG"
+
+if [[ "$BUILD_OK" != "1" ]]; then
+    echo "❌ Build failed — no release commit, no tag."
+    notify_pager failed "build FAILED: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER}" "$(tail -n 50 /dev/null 2>/dev/null || echo 'see docker buildx output above')"
+    exit 1
+fi
+trap - ERR INT TERM
 
 echo "✅ Successfully built and pushed ${IMAGE_NAME}:${TAG} for ${PLATFORMS}"
 
-# --- git tag: every build is tagged ---------------------------------------
+# --- release commit + tag: ONLY after a successful build --------------------
 if git rev-parse --git-dir >/dev/null 2>&1; then
     V="v$(tr -d ' \n' < VERSION 2>/dev/null || true)"
     if [[ "$V" == "v" ]]; then V="v${TAG}"; fi
     if git rev-parse -q --verify "refs/tags/${V}" >/dev/null; then
         echo "🏷️  Tag ${V} already exists"
     else
-        git tag -a "${V}" -m "PagerSMTPd ${V#v}" && echo "🏷️  Tagged ${V}"
+        git add -A 2>/dev/null || true
+        if ! git diff --cached --quiet; then
+            git commit -q -m "release: ${V} build ${BUILD_NUMBER} (${IMAGE_NAME}:${TAG})" && echo "📝 Release commit ${V} build ${BUILD_NUMBER}"
+        fi
+        git tag -a "${V}" -m "${V} build ${BUILD_NUMBER}" && echo "🏷️  Tagged ${V} (build ${BUILD_NUMBER})"
     fi
 fi
+
+SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+notify_pager succeeded "build OK: ${IMAGE_NAME}:${TAG} build#${BUILD_NUMBER} commit=${SHA} platforms=${PLATFORMS}" "image pushed: ${IMAGE_NAME}:${TAG}"

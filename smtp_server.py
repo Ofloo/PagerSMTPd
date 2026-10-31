@@ -52,6 +52,7 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "0.0.0.0")
 SMTP_PORT = env_int("SMTP_PORT", 8025)
 MAX_MESSAGE_BYTES = env_int("MAX_MESSAGE_BYTES", 60000)
 MAX_ATTACHMENT_BYTES = env_int("MAX_ATTACHMENT_BYTES", 104857600)  # 100 MB
+MAX_ATTACHMENTS = env_int("MAX_ATTACHMENTS", 10)
 SHARE_TIMEOUT_SECONDS = env_int("SHARE_TIMEOUT_SECONDS", 60)
 PAGER_TIMEOUT_SECONDS = env_int("PAGER_TIMEOUT_SECONDS", 15)
 RATE_LIMIT_MESSAGES = env_int("RATE_LIMIT_MESSAGES", 20)
@@ -62,12 +63,22 @@ PROJECT = os.environ.get("PAGER_PROJECT", "smtp")
 if not PAGER_DOMAIN:
     print("FATAL: PAGER_DOMAIN environment variable is required", file=sys.stderr)
     sys.exit(2)
-if not PAGER_URL.lower().startswith("https://"):
-    print("FATAL: PAGER_URL must be HTTPS", file=sys.stderr)
+ALLOW_INSECURE = os.environ.get("PAGER_ALLOW_INSECURE", "") == "1"
+
+
+def _require_https(name: str, url: str) -> None:
+    if url.lower().startswith("https://"):
+        return
+    host = url.lower().split("://", 1)[-1].split("/", 1)[0].split(":")[0]
+    if ALLOW_INSECURE and host in ("127.0.0.1", "localhost", "::1"):
+        LOG.warning("%s is plain HTTP on %s — only allowed with PAGER_ALLOW_INSECURE=1", name, host)
+        return
+    print(f"FATAL: {name} must be HTTPS (got {url!r})", file=sys.stderr)
     sys.exit(2)
-if not SHARE_URL.lower().startswith("https://"):
-    print("FATAL: SHARE_URL must be HTTPS", file=sys.stderr)
-    sys.exit(2)
+
+
+_require_https("PAGER_URL", PAGER_URL)
+_require_https("SHARE_URL", SHARE_URL)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -201,19 +212,27 @@ class PagerHandler:
     async def handle_DATA(self, server, session, envelope):
         peer = session.peer[0] if session.peer else "unknown"
         raw = envelope.content
-        if len(raw) > MAX_MESSAGE_BYTES:
-            LOG.info("DATA from %s too large: %d bytes > %d", peer, len(raw), MAX_MESSAGE_BYTES)
-            return f"550 5.3.4 message too large ({len(raw)} > {MAX_MESSAGE_BYTES} bytes)"
+        msg = email.message_from_bytes(raw, policy=email.policy.default)
+
+        # Message size limit applies to headers + text body only.
+        # Attachments go to SHARE_URL under their own (much larger) limit.
+        text_bytes = len(msg.get("Subject", "").encode()) + len(str(msg.get("From", "")).encode())
+        text_bytes += len(extract_text(msg).encode("utf-8", "replace"))
+        if text_bytes > MAX_MESSAGE_BYTES:
+            LOG.info("message from %s too large: %d bytes > %d", peer, text_bytes, MAX_MESSAGE_BYTES)
+            return f"550 5.3.4 message too large ({text_bytes} > {MAX_MESSAGE_BYTES} bytes)"
 
         mailbox = envelope.rcpt_tos[0]
         local = mailbox.rpartition("@")[0]
 
-        msg = email.message_from_bytes(raw, policy=email.policy.default)
         subject = str(msg.get("Subject", ""))
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
 
         attachments = extract_attachments(msg)
+        if len(attachments) > MAX_ATTACHMENTS:
+            LOG.info("too many attachments from %s: %d > %d", peer, len(attachments), MAX_ATTACHMENTS)
+            return f"550 5.3.4 too many attachments ({len(attachments)} > {MAX_ATTACHMENTS})"
         for name, payload in attachments:
             if len(payload) > MAX_ATTACHMENT_BYTES:
                 LOG.info(
@@ -273,9 +292,7 @@ class PagerController(Controller):
     def factory(self):
         return SMTPServer(
             self.handler,
-            hostname=self.hostname,
-            port=self.port,
-            data_size_limit=MAX_MESSAGE_BYTES + 65536,
+            data_size_limit=MAX_MESSAGE_BYTES + MAX_ATTACHMENT_BYTES * MAX_ATTACHMENTS + 1048576,
             decode_data=False,
         )
 
