@@ -482,12 +482,16 @@ class PagerHandler:
         sender = str(msg.get("From", ""))
         message_id = str(msg.get("Message-ID", "")) or uuidlib.uuid4().hex
         body_text = clean_text(extract_text(msg))
-        # No header block: the page shows the text body only. Transport and
-        # spam headers are dropped by clean_text() as well.
-        logs = body_text[:6000]
+        # The PagerAPP page views render `message` (logs is only shown by some
+        # clients / the notification), so the whole mail text goes into
+        # `message`: title line, blank line, cleaned body. `logs` stays empty to
+        # avoid showing the body twice in notifications.
+        body_text = body_text[:6000]
         if log_notes:
-            logs = (logs + "\n" + "\n".join(log_notes)).strip()
+            body_text = (body_text + "\n" + "\n".join(log_notes)).strip()
         title = notification_title(sender, subject)
+        message = f"{title}\n\n{body_text}" if body_text else title
+        message = message[:8000]
 
         recipients = sorted({addr.rpartition("@")[0].lower() for addr in envelope.rcpt_tos})
         permanent = False
@@ -502,8 +506,8 @@ class PagerHandler:
                 "status": 1,
                 "status_text": "received",
                 "exit_code": 0,
-                "message": title,
-                "logs": logs,
+                "message": message,
+                "logs": "",
                 "attachments": attachment_urls,
                 "source": "smtp",
                 "smtpd_version": VERSION_STRING,
