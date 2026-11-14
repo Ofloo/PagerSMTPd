@@ -42,6 +42,9 @@ Resultaat: een page met titel "Deployment failed", de body als detailtekst en
 | — | `status` | `1` (warning: nieuwe mail) |
 | `Subject` | `PROJECT` | het onderwerp (leesbaar in PagerAPP); leeg → `PAGER_PROJECT` |
 
+Precedence voor `PROJECT`: **niet-lege `X-Pager-Project`** (header of body-blok) →
+**mailonderwerp** → **`PAGER_PROJECT`** (default `smtp`).
+
 ### Wat uit de mail gefilterd wordt
 
 Transport- en spamheaders (`Received`, `DKIM-Signature`, `X-Spam-*`,
@@ -91,7 +94,7 @@ Het blok moet bovenaan staan, eindigt bij de eerste regel die geen
 |---|---|---|
 | `X-Pager-Status` | `0`-`5` of `success`/`warning`/`failed`/`critical`/`running`/`queued` | status van de page |
 | `X-Pager-Prio` | `debug` \| `info` \| `warning` \| `alarm` \| `critical` | wint van `status` |
-| `X-Pager-Project` | tekst (max 64) | overschrijft `PROJECT` (default: het onderwerp) |
+| `X-Pager-Project` | tekst (max 64) | overschrijft `PROJECT`; leeg/leegtes → het onderwerp |
 | `X-Pager-Job-Id` | tekst (max 200) | overschrijft `JOB_ID` |
 | `X-Pager-Silent` | `1`/`true`/`yes`/`on` | geen notificatie (`prio: info`) |
 | `X-Pager-Tags` | kommagescheiden (max 10, elk 32) | extra veld `tags[]` |

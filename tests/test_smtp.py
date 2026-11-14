@@ -358,6 +358,37 @@ check("untrusted urgency is clamped", bool(notes)
 if notes:
     check("clamp is explained in the page", "not trusted" in notes[0]["payload"]["logs"])
 
+# 1n. X-Pager-Project precedence: non-empty wins; empty falls back to subject
+m = EmailMessage()
+m["From"] = "sender@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "subject-wint"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m["X-Pager-Project"] = "   "  # blank header -> must not wipe the project
+m.set_content("X-Pager-Project:\n\nBody met leeg project in het blok.")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "subject-wint" in n["payload"]["message"]]
+check("blank X-Pager-Project falls back to the subject",
+      bool(notes) and notes[0]["payload"].get("PROJECT") == "subject-wint",
+      str(notes[0]["payload"].get("PROJECT")) if notes else "missing")
+
+m = EmailMessage()
+m["From"] = "sender@example.org"
+m["To"] = f"{VALID_UUID}@{DOMAIN}"
+m["Subject"] = "subject-verliest"
+m["Message-ID"] = f"<{uuid.uuid4().hex}@example.org>"
+m["X-Pager-Project"] = "CI"
+m.set_content("Body.")
+code, msg = send(f"{VALID_UUID}@{DOMAIN}", m.as_bytes(policy=email.policy.SMTP))
+time.sleep(0.4)
+st = state()
+notes = [n for n in st["notify"] if n["mailbox"] == VALID_UUID and "subject-verliest" in n["payload"]["message"]]
+check("non-empty X-Pager-Project overrides the subject",
+      bool(notes) and notes[0]["payload"].get("PROJECT") == "CI",
+      str(notes[0]["payload"].get("PROJECT")) if notes else "missing")
+
 # 2. wrong domain -> 550
 code, msg = send(f"{VALID_UUID}@other.example", build_mail())
 check("wrong domain rejected (550)", code == 550, f"{code} {msg}")
