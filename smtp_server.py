@@ -593,18 +593,21 @@ class PagerHandler:
             for key in CONTROL_KEYS
             if msg.get(f"X-Pager-{key}") is not None
         }
-        resolved, control_notes = resolve_controls(
-            {**header_controls, **body_controls}, sender, PROJECT, message_id
-        )
-
         # RFC-PagerAPP-0003: message is the readable title (normally the
         # subject), logs is the plain-text body.
         body_text = clean_text(raw_body)[:8000]
+        subject_text = (subject or "").strip()
+        message = subject_text or body_text.strip()[:120] or "(no subject)"
+
+        # PROJECT defaults to the mail subject (readable in PagerAPP), with
+        # PAGER_PROJECT as fallback when the subject is empty.
+        resolved, control_notes = resolve_controls(
+            {**header_controls, **body_controls}, sender,
+            subject_text or PROJECT, message_id,
+        )
         notes = control_notes + log_notes
         if notes:
             body_text = (body_text + "\n" + "\n".join(notes)).strip()
-        subject_text = (subject or "").strip()
-        message = subject_text or body_text.strip()[:120] or "(no subject)"
 
         recipients = sorted({addr.rpartition("@")[0].lower() for addr in envelope.rcpt_tos})
         permanent = False

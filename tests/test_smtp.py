@@ -118,6 +118,7 @@ if notes:
           all(k in p for k in ("PROJECT", "JOB_ID", "status", "message", "logs")), json.dumps(p)[:200])
     check("status is numeric for PagerAPP", isinstance(p.get("status"), int), repr(p.get("status")))
     check("message is the subject (RFC gateway mapping)", p["message"] == "hello", repr(p["message"]))
+    check("PROJECT is the mail subject", p.get("PROJECT") == "hello", str(p.get("PROJECT")))
     check("logs is the plain-text body", "test body" in p["logs"], repr(p["logs"])[:80])
     check("logs has no header block", not p["logs"].startswith("From:"), p["logs"][:80])
 

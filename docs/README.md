@@ -40,7 +40,7 @@ Resultaat: een page met titel "Deployment failed", de body als detailtekst en
 | `Message-ID` | `JOB_ID` | correlatie |
 | `From` | — | niet in het payload (`from` is voor chat-sender-ids) |
 | — | `status` | `1` (warning: nieuwe mail) |
-| — | `PROJECT` | `PAGER_PROJECT` (default `smtp`) |
+| `Subject` | `PROJECT` | het onderwerp (leesbaar in PagerAPP); leeg → `PAGER_PROJECT` |
 
 ### Wat uit de mail gefilterd wordt
 
@@ -91,7 +91,7 @@ Het blok moet bovenaan staan, eindigt bij de eerste regel die geen
 |---|---|---|
 | `X-Pager-Status` | `0`-`5` of `success`/`warning`/`failed`/`critical`/`running`/`queued` | status van de page |
 | `X-Pager-Prio` | `debug` \| `info` \| `warning` \| `alarm` \| `critical` | wint van `status` |
-| `X-Pager-Project` | tekst (max 64) | overschrijft `PROJECT` |
+| `X-Pager-Project` | tekst (max 64) | overschrijft `PROJECT` (default: het onderwerp) |
 | `X-Pager-Job-Id` | tekst (max 200) | overschrijft `JOB_ID` |
 | `X-Pager-Silent` | `1`/`true`/`yes`/`on` | geen notificatie (`prio: info`) |
 | `X-Pager-Tags` | kommagescheiden (max 10, elk 32) | extra veld `tags[]` |
